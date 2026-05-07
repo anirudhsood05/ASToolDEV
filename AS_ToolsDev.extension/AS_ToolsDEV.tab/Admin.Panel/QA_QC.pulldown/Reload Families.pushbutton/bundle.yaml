@@ -1,0 +1,10 @@
+title:
+  en_us: Reload Families
+
+tooltip:
+  en_us: >-
+    This tool gives you the option to load multiple Families from a folder and its subfolders.
+    
+    You can choose to load the Family with all its Types, or select Types for each Family.
+
+author: Anirudh Sood

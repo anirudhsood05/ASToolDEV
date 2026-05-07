@@ -1,0 +1,27 @@
+SeriesNumber,SeriesName,ViewType,ViewTemplate,TagRooms,TagDoors,TagWindows,TagWalls,TagCeilings,CreateRCP,LevelNumbering,AutoGenerate,WallFilter,DoorFilter,WindowFilter,UserGuidance
+0,Proposed GA Layouts,FloorPlan,PUBLISHED - 00 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,GENERAL ARRANGEMENT PLANS: Only rooms will be tagged. Use this series for overall layout documentation showing room names and numbers.
+1,Existing Layouts,FloorPlan,PUBLISHED - 01 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+2,Demolition Layouts,FloorPlan,PUBLISHED - 02 - PLANS,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,DEMOLITION PLANS: No automatic tagging. Use this series to show elements to be removed. Manually tag elements as needed.
+3,Site Layouts / Location Plans / Boundaries,FloorPlan,PUBLISHED - 03 - PLANS,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+6,Areas,AreaPlan,PUBLISHED - 06 - AREA PLANS (NIA) 1_100,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,AREA PLANS: Rooms will be tagged showing areas. Requires GIA or GEA area scheme in project. Creates area boundary views for space calculations.
+7,Planning,FloorPlan,PUBLISHED - 07 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+8,Fire Strategy,FloorPlan,PUBLISHED - 08 - PLANS,TRUE,TRUE,FALSE,TRUE,FALSE,FALSE,TRUE,TRUE,AUK_Wall_,AUK_Door_,,"FIRE STRATEGY: Tags rooms, fire-rated walls (AUK_Wall_*) and fire doors (AUK_Door_*). Ensure wall types and door families follow AUK naming convention for automatic tagging."
+20,Existing External Facade,FloorPlan,PUBLISHED - 20 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+21,Proposed External Facade,FloorPlan,PUBLISHED - 21 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+22,Internal Walls Partitions,FloorPlan,PUBLISHED - 22 - PLANS,TRUE,FALSE,FALSE,TRUE,FALSE,FALSE,TRUE,TRUE,AUK_Wall_Partition_,,,PARTITION WALLS: Tags rooms and partition walls only. Wall types must contain 'AUK_Wall_Partition_' to be tagged (e.g. AUK_Wall_Partition_P2_122mm). External and structural walls will be skipped.
+23,Floors,FloorPlan,PUBLISHED - 23 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+24,Cores,FloorPlan,PUBLISHED - 24 - PLANS,TRUE,FALSE,FALSE,TRUE,FALSE,FALSE,TRUE,TRUE,AUK_Wall_,,,"CORE WALLS: Tags rooms and core walls. Wall types must contain 'AUK_Wall_' to be tagged. Use for stair cores, lift shafts, and service risers."
+25,Stair and Ramps,FloorPlan,PUBLISHED - 25 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+26,Lift Lobby,FloorPlan,PUBLISHED - 26 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+27,Roofs,FloorPlan,PUBLISHED - 27 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+30,Internal Walls - Blockwork / Brickwork,FloorPlan,PUBLISHED - 30 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+31,External Windows Doors Louvres,FloorPlan,PUBLISHED - 31 - PLANS,TRUE,TRUE,TRUE,FALSE,FALSE,FALSE,TRUE,TRUE,,AUK_Door_,AUK_Window_,"EXTERNAL OPENINGS: Tags rooms, external doors (AUK_Door_*) and windows (AUK_Window_*). Ensure door and window families follow AUK naming for automatic tagging."
+32,Internal Doors,FloorPlan,PUBLISHED - 32 - PLANS,TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,AUK_Door_,,INTERNAL DOORS: Tags rooms and internal doors only. Door families must contain 'AUK_Door_' to be tagged. Use for door schedules and coordination.
+33,Raised Floors,FloorPlan,PUBLISHED - 33 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+35,Ceilings,CeilingPlan,PUBLISHED - 35 - RCP,TRUE,FALSE,FALSE,FALSE,TRUE,TRUE,TRUE,TRUE,,,,"REFLECTED CEILING PLANS: Creates RCP views and tags rooms and ceilings. Note: Walls, doors, and windows are not visible in RCP views."
+42,Internal Wall Finishes,FloorPlan,PUBLISHED - 42 - PLANS,TRUE,FALSE,FALSE,TRUE,FALSE,FALSE,TRUE,TRUE,AUK_Wall_,,,WALL FINISHES: Tags rooms and walls containing 'AUK_Wall_'. Use for finish schedules and material coordination. Check wall type parameters for finish information.
+70,Block Layouts,FloorPlan,PUBLISHED - 70 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+71,Circulation,FloorPlan,PUBLISHED - 71 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+72,Space planning / Furniture Layouts,FloorPlan,PUBLISHED - 72 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+73,Kitchens,FloorPlan,PUBLISHED - 73 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,
+74,Bathrooms / WCs,FloorPlan,PUBLISHED - 74 - PLANS,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE,TRUE,,,,

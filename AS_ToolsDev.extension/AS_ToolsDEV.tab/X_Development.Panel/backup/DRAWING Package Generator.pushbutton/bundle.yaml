@@ -1,0 +1,6 @@
+title: "DRAWING Package Generator"
+tooltip: |
+  Create standard drawing packages with this tool. The plugin creates views for all levels, 
+  applies the reevant view template, creates a sheet and places views (optionally also place legend notes)
+  on sheets.
+  Author: Anirudh Sood

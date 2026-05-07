@@ -1,0 +1,7 @@
+title:
+  en_us: ROOM Check Mirror in Group
+tooltip:
+  en_us: Detects mirror status using wall elements in groups and 'writes' to a text parameter.
+author: Anirudh Sood
+
+
