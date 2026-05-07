@@ -1,0 +1,8 @@
+title: >-
+  DWG to
+  Detail Family
+tooltip: >-
+  Batch-converts DWG files into Revit detail item families (.rfa).
+  Select a family template, one or more DWG files, and an output folder.
+author: AS Tools
+context: doc-project
