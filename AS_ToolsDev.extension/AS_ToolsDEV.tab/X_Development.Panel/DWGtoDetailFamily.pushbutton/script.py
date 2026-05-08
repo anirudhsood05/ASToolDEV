@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 __title__ = 'DWG\nConverter'
-__doc__ = """Two-mode DWG converter.
-Mode A: Batch-converts DWG files into Revit detail item families (.rfa).
-Mode B: Converts an imported/linked DWG in the current view into native
-Revit lines (Detail, Model, Area Boundary, Room Separation, Space Boundary)
-with simple or per-layer linestyle assignment."""
+__doc__ = """Guided DWG-to-native-lines converter.
+
+Project mode (two steps):
+  Step 1 — select a family template, DWG file(s), and output folder.
+  Step 2 — choose line type and linestyle assignment.
+  The tool creates each .rfa family, converts the DWG geometry to native
+  Revit lines, removes the original CAD import, and saves a clean family.
+
+Family Editor mode:
+  Detects the imported DWG in the open family, then guides you through
+  choosing line type and linestyle to convert it in place."""
 __author__ = "AS Tools"
 
 import os
@@ -27,22 +33,22 @@ from Autodesk.Revit.DB import (
     GraphicsStyleType, ViewSchedule, ImportInstance, CurveArray,
     SketchPlane, Plane, XYZ,
 )
-from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
 from Autodesk.Revit.Exceptions import OperationCanceledException
 
 from pyrevit import revit, forms, script
 
+app    = __revit__.Application
 uidoc  = revit.uidoc
 doc    = revit.doc
-app    = doc.Application
 output = script.get_output()
 
+
 # ---------------------------------------------------------------------------
-# MODE A — DWG → DETAIL FAMILY (.rfa)
+# SHARED UTILITIES
 # ---------------------------------------------------------------------------
 
 class WarningSwallower(IFailuresPreprocessor):
-    """Suppresses DWG import warnings silently."""
+    """Suppresses DWG import warnings."""
     def PreprocessFailures(self, failuresAccessor):
         for msg in list(failuresAccessor.GetFailureMessages()):
             if msg.GetSeverity() == FailureSeverity.Warning:
@@ -52,8 +58,8 @@ class WarningSwallower(IFailuresPreprocessor):
 
 def pick_file(title, file_filter, multi=False):
     dlg = OpenFileDialog()
-    dlg.Title      = title
-    dlg.Filter     = file_filter
+    dlg.Title       = title
+    dlg.Filter      = file_filter
     dlg.Multiselect = multi
     if dlg.ShowDialog() == DialogResult.OK:
         return list(dlg.FileNames) if multi else dlg.FileName
@@ -68,138 +74,13 @@ def pick_folder(description):
     return None
 
 
-def get_ref_level_floor_plan(fam_doc):
-    """Return the 'Ref. Level' floor plan view from a family document."""
-    collector = FilteredElementCollector(fam_doc).OfCategory(BuiltInCategory.OST_Views)
-    for view in collector:
-        if (isinstance(view, ViewPlan)
-                and not view.IsTemplate
-                and view.ViewType == ViewType.FloorPlan
-                and view.Name == "Ref. Level"):
-            return view
-    return None
-
-
-def create_family_from_dwg(dwg_path, template_path, save_folder):
-    """
-    Open a new family from template_path, import dwg_path, save as .rfa.
-    Returns (save_path, None) on success or (None, error_message) on failure.
-    """
-    try:
-        fam_doc = app.NewFamilyDocument(template_path)
-    except Exception as ex:
-        return None, "NewFamilyDocument failed: " + str(ex)
-
-    if fam_doc is None:
-        return None, "NewFamilyDocument returned None."
-
-    t = Transaction(fam_doc, "Import DWG")
-    try:
-        fail_opts = t.GetFailureHandlingOptions()
-        fail_opts.SetFailuresPreprocessor(WarningSwallower())
-        t.SetFailureHandlingOptions(fail_opts)
-        t.Start()
-
-        floor_plan = get_ref_level_floor_plan(fam_doc)
-        if floor_plan is None:
-            t.RollBack()
-            fam_doc.Close(False)
-            return None, "No 'Ref. Level' floor plan found in template."
-
-        dwg_opts           = DWGImportOptions()
-        dwg_opts.Placement = ImportPlacement.Origin
-        fam_doc.Import(dwg_path, dwg_opts, floor_plan)
-        t.Commit()
-
-    except Exception as ex:
-        try:
-            t.RollBack()
-        except Exception:
-            pass
-        try:
-            fam_doc.Close(False)
-        except Exception:
-            pass
-        return None, "Import transaction failed: " + str(ex)
-
-    dwg_filename = os.path.basename(dwg_path)
-    rfa_name     = os.path.splitext(dwg_filename)[0] + ".rfa"
-    save_path    = os.path.join(save_folder, rfa_name)
-
-    try:
-        save_opts = SaveAsOptions()
-        save_opts.OverwriteExistingFile = True
-        fam_doc.SaveAs(save_path, save_opts)
-        fam_doc.Close(False)
-        return save_path, None
-    except Exception as ex:
-        try:
-            fam_doc.Close(False)
-        except Exception:
-            pass
-        return None, "Save failed: " + str(ex)
-
-
-def run_mode_a():
-    template_path = pick_file(
-        "Select Family Template (.rft)",
-        "Family Templates (*.rft)|*.rft"
-    )
-    if not template_path:
-        forms.alert("No template selected. Operation cancelled.", exitscript=True)
-        return
-    if not os.path.isfile(template_path):
-        forms.alert("Template file not found:\n" + template_path, exitscript=True)
-        return
-
-    dwg_files = pick_file(
-        "Select DWG Files to Convert",
-        "DWG Files (*.dwg)|*.dwg",
-        multi=True
-    )
-    if not dwg_files:
-        forms.alert("No DWG files selected. Operation cancelled.", exitscript=True)
-        return
-
-    save_folder = pick_folder("Select Folder to Save RFA Families")
-    if not save_folder:
-        forms.alert("No save folder selected. Operation cancelled.", exitscript=True)
-        return
-
-    created = 0
-    failed  = []
-
-    for dwg_path in dwg_files:
-        save_path, err = create_family_from_dwg(dwg_path, template_path, save_folder)
-        name = os.path.basename(dwg_path)
-        if save_path:
-            created += 1
-            output.print_md("**Created**: {}".format(os.path.basename(save_path)))
-        else:
-            failed.append("{} ({})".format(name, err or "Unknown error"))
-            output.print_md("**Failed**: {} - {}".format(name, err or "Unknown error"))
-
-    msg = "Created {} famil{} saved to:\n{}".format(
-        created,
-        "ies" if created != 1 else "y",
-        save_folder
-    )
-    if failed:
-        msg += "\n\nFailed ({}):\n- {}".format(len(failed), "\n- ".join(failed))
-    forms.alert(msg)
-
-
-# ---------------------------------------------------------------------------
-# MODE B — DWG → NATIVE REVIT LINES
-# ---------------------------------------------------------------------------
-
 # ── Linestyle helpers ────────────────────────────────────────────────────────
 
 def get_all_linestyles(document):
-    """Return list of Category from OST_Lines SubCategories. Read-only, no tx needed."""
+    """Return list of Category from OST_Lines SubCategories. No transaction needed."""
     try:
-        lines_cat = document.Settings.Categories.get_Item(BuiltInCategory.OST_Lines)
-        return list(lines_cat.SubCategories)
+        cat = document.Settings.Categories.get_Item(BuiltInCategory.OST_Lines)
+        return list(cat.SubCategories)
     except Exception:
         return []
 
@@ -212,21 +93,22 @@ def get_linestyle_by_name(document, name):
     return None
 
 
-# ── Selection filter ─────────────────────────────────────────────────────────
+# ── View helpers ─────────────────────────────────────────────────────────────
 
-class ImportInstanceFilter(ISelectionFilter):
-    """Allows selection of ImportInstance elements only."""
-    def AllowElement(self, element):
-        return isinstance(element, ImportInstance)
-
-    def AllowReference(self, reference, position):
-        return False
+def get_ref_level_floor_plan(fam_doc):
+    """Return the 'Ref. Level' floor plan view from a family document."""
+    for view in FilteredElementCollector(fam_doc).OfCategory(BuiltInCategory.OST_Views):
+        if (isinstance(view, ViewPlan)
+                and not view.IsTemplate
+                and view.ViewType == ViewType.FloorPlan
+                and view.Name == "Ref. Level"):
+            return view
+    return None
 
 
 # ── Geometry extraction ──────────────────────────────────────────────────────
 
 def get_layer_name(geom_obj, document):
-    """Return the DWG layer name from a geometry object's GraphicsStyle."""
     try:
         gs = document.GetElement(geom_obj.GraphicsStyleId)
         if gs is not None:
@@ -237,18 +119,13 @@ def get_layer_name(geom_obj, document):
 
 
 def _iter_geom_curves(import_instance, document):
-    """
-    Generator that yields (layer_name, Curve) pairs from an ImportInstance.
-    PolyLines are split into individual Line segments; degenerate segments skipped.
-    """
+    """Yield (layer_name, Curve) pairs; PolyLines split into segments."""
     opts = Options()
-    opts.ComputeReferences     = False
-    opts.IncludeNonVisibleObjects = False
-
+    opts.ComputeReferences          = False
+    opts.IncludeNonVisibleObjects   = False
     geom_elem = import_instance.get_Geometry(opts)
     if geom_elem is None:
         return
-
     for top_obj in geom_elem:
         if not isinstance(top_obj, GeometryInstance):
             continue
@@ -258,10 +135,9 @@ def _iter_geom_curves(import_instance, document):
                 pts = child.GetCoordinates()
                 for i in range(len(pts) - 1):
                     try:
-                        seg = Line.CreateBound(pts[i], pts[i + 1])
-                        yield layer, seg
+                        yield layer, Line.CreateBound(pts[i], pts[i + 1])
                     except Exception:
-                        pass  # degenerate segment (identical endpoints)
+                        pass  # degenerate segment — skip
             elif isinstance(child, Curve):
                 try:
                     if child.Length > 1e-9:
@@ -271,112 +147,43 @@ def _iter_geom_curves(import_instance, document):
 
 
 def extract_curves_by_layer(import_instance, document):
-    """Return dict {layer_name: [Curve]} from an ImportInstance."""
-    layer_map = {}
+    """Return {layer_name: [Curve]} from an ImportInstance."""
+    result = {}
     for layer, curve in _iter_geom_curves(import_instance, document):
-        layer_map.setdefault(layer, []).append(curve)
-    return layer_map
+        result.setdefault(layer, []).append(curve)
+    return result
 
 
 def extract_all_curves(import_instance, document):
-    """Return flat list of all Curves from an ImportInstance (layer-agnostic)."""
-    return [curve for _, curve in _iter_geom_curves(import_instance, document)]
+    """Return flat list of all Curves, ignoring layers."""
+    return [c for _, c in _iter_geom_curves(import_instance, document)]
 
 
-# ── View / line-type validation ──────────────────────────────────────────────
-
-LINE_TYPE_LABELS = {
-    'detail': 'Detail Line',
-    'model':  'Model Line',
-    'area':   'Area Boundary',
-    'room':   'Room Separation',
-    'space':  'Space Boundary',
-}
-
-LABEL_TO_KEY = {v: k for k, v in LINE_TYPE_LABELS.items()}
-
-
-def validate_view_for_line_type(document, line_type):
-    """
-    Check the active view supports the requested line type.
-    Returns (True, '') on success or (False, reason_string) on failure.
-    """
-    view = document.ActiveView
-    is_family = document.IsFamilyDocument
-
-    if line_type in ('area', 'room', 'space') and is_family:
-        return False, "{} lines are not supported in family documents.".format(
-            LINE_TYPE_LABELS[line_type])
-
-    if line_type == 'area':
-        if not (isinstance(view, ViewPlan) and view.ViewType == ViewType.AreaPlan):
-            return False, "Area Boundary lines require an Area Plan view."
-
-    if line_type in ('room', 'space'):
-        if not isinstance(view, ViewPlan):
-            return False, "{} lines require a Floor Plan or Reflected Ceiling Plan view.".format(
-                LINE_TYPE_LABELS[line_type])
-
-    return True, ''
-
-
-# ── Line creation ────────────────────────────────────────────────────────────
+# ── Line creation ─────────────────────────────────────────────────────────────
 
 def create_line(document, view, curve, line_type):
     """
-    Create a single Revit line element from a Curve.
-    Returns the created element, or raises on failure.
+    Create one native line from a Curve. line_type: 'detail' | 'model'.
+    Called inside an open Transaction.
     """
     is_family = document.IsFamilyDocument
-
     if line_type == 'detail':
         if is_family:
             return document.FamilyCreate.NewDetailCurve(view, curve)
         return document.Create.NewDetailCurve(view, curve)
-
-    if line_type == 'model':
-        sp = view.SketchPlane
-        if sp is None:
-            # Family views may not have a sketch plane set — create one on XY plane at Z=0
-            plane = Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero)
-            sp = SketchPlane.Create(document, plane)
-        if is_family:
-            return document.FamilyCreate.NewModelCurve(curve, sp)
-        return document.Create.NewModelCurve(curve, sp)
-
-    if line_type == 'area':
-        sp = view.SketchPlane
-        ca = CurveArray()
-        ca.Append(curve)
-        result = document.Create.NewAreaBoundaryLine(sp, ca, view)
-        # NewAreaBoundaryLine returns a ModelCurveArray
-        if result and result.Size > 0:
-            return result.get_Item(0)
-        return None
-
-    if line_type == 'room':
-        sp = view.SketchPlane
-        ca = CurveArray()
-        ca.Append(curve)
-        result = document.Create.NewRoomBoundaryLines(sp, ca, view)
-        if result and result.Size > 0:
-            return result.get_Item(0)
-        return None
-
-    if line_type == 'space':
-        sp = view.SketchPlane
-        ca = CurveArray()
-        ca.Append(curve)
-        result = document.Create.NewSpaceBoundaryLines(sp, ca, view)
-        if result and result.Size > 0:
-            return result.get_Item(0)
-        return None
-
-    raise ValueError("Unknown line_type: " + line_type)
+    # model
+    sp = view.SketchPlane
+    if sp is None:
+        # Family views may not have a sketch plane set — create a fallback
+        plane = Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero)
+        sp    = SketchPlane.Create(document, plane)
+    if is_family:
+        return document.FamilyCreate.NewModelCurve(curve, sp)
+    return document.Create.NewModelCurve(curve, sp)
 
 
 def apply_linestyle(element, document, linestyle_name):
-    """Assign a linestyle to a created line element. Silently skips if not found."""
+    """Assign a linestyle to a line element. Silent no-op if not found."""
     if element is None or not linestyle_name:
         return
     gs = get_linestyle_by_name(document, linestyle_name)
@@ -388,66 +195,58 @@ def apply_linestyle(element, document, linestyle_name):
         pass
 
 
-# ── Conversion core (called inside an open Transaction) ─────────────────────
+# ── Conversion core (runs inside an open Transaction) ────────────────────────
 
-def convert_simple(document, view, curves, linestyle_name, line_type):
+def convert_import_to_lines(document, import_instance, view, line_type, style_config):
     """
-    Create lines for all curves using a single linestyle.
+    Convert ImportInstance geometry to native lines.
+    style_config: {'mode': 'simple', 'style': name}
+               or {'mode': 'by_layer', 'mapping': {layer: style}}
     Returns (created_count, [failure_strings]).
-    Must be called inside an active transaction.
     """
     created  = 0
     failures = []
-    for curve in curves:
-        try:
-            elem = create_line(document, view, curve, line_type)
-            apply_linestyle(elem, document, linestyle_name)
-            created += 1
-        except Exception as ex:
-            failures.append(str(ex))
-    return created, failures
+    mode     = style_config.get('mode', 'simple')
 
-
-def convert_by_layer(document, view, layer_curve_map, layer_style_map, line_type):
-    """
-    Create lines per layer using the provided layer→linestyle mapping.
-    Layers with no mapping entry are skipped.
-    Returns (created_count, [failure_strings]).
-    Must be called inside an active transaction.
-    """
-    created  = 0
-    failures = []
-    for layer_name, curves in layer_curve_map.items():
-        linestyle_name = layer_style_map.get(layer_name, '')
-        if not linestyle_name:
-            output.print_md("**Skipped layer** (no style assigned): {}".format(layer_name))
-            continue
-        for curve in curves:
+    if mode == 'simple':
+        style = style_config.get('style', '')
+        for curve in extract_all_curves(import_instance, document):
             try:
                 elem = create_line(document, view, curve, line_type)
-                apply_linestyle(elem, document, linestyle_name)
+                apply_linestyle(elem, document, style)
                 created += 1
             except Exception as ex:
-                failures.append("Layer '{}': {}".format(layer_name, str(ex)))
+                failures.append(str(ex))
+    else:
+        mapping        = style_config.get('mapping', {})
+        layer_curve_map = extract_curves_by_layer(import_instance, document)
+        for layer, curves in layer_curve_map.items():
+            style = mapping.get(layer, '')
+            if not style:
+                output.print_md("  Skipped layer (no style assigned): **{}**".format(layer))
+                continue
+            for curve in curves:
+                try:
+                    elem = create_line(document, view, curve, line_type)
+                    apply_linestyle(elem, document, style)
+                    created += 1
+                except Exception as ex:
+                    failures.append("Layer '{}': {}".format(layer, ex))
+
     return created, failures
 
 
-# ── By-Layer WPF dialog ──────────────────────────────────────────────────────
+# ── WPF By-Layer mapping dialog ───────────────────────────────────────────────
 
 BY_LAYER_XAML = u"""<Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Map DWG Layers to Linestyles"
-    Width="540"
-    SizeToContent="Height"
-    MinHeight="150"
-    MaxHeight="680"
+    Width="540" SizeToContent="Height"
+    MinHeight="150" MaxHeight="680"
     ResizeMode="CanResize"
     WindowStartupLocation="CenterScreen"
     ShowInTaskbar="False"
-    FontFamily="Arial"
-    FontSize="12"
-    Background="#F5F5F5">
+    FontFamily="Arial" FontSize="12" Background="#F5F5F5">
   <Grid Margin="12">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -455,55 +254,37 @@ BY_LAYER_XAML = u"""<Window
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-
     <TextBlock Grid.Row="0"
                Text="Assign a linestyle to each DWG layer (leave blank to skip):"
-               FontWeight="Bold"
-               Margin="0,0,0,8"/>
-
-    <ScrollViewer Grid.Row="1"
-                  MaxHeight="500"
+               FontWeight="Bold" Margin="0,0,0,8"/>
+    <ScrollViewer Grid.Row="1" MaxHeight="500"
                   VerticalScrollBarVisibility="Auto">
       <StackPanel x:Name="layerStack" Margin="0,0,4,0"/>
     </ScrollViewer>
-
     <Separator Grid.Row="2" Margin="0,10"/>
-
-    <StackPanel Grid.Row="3"
-                Orientation="Horizontal"
+    <StackPanel Grid.Row="3" Orientation="Horizontal"
                 HorizontalAlignment="Right">
-      <Button x:Name="btnCancel"
-              Content="Cancel"
-              Width="80"
-              Height="26"
-              Margin="0,0,8,0"/>
-      <Button x:Name="btnOk"
-              Content="OK"
-              Width="80"
-              Height="26"
-              Background="#143D5C"
-              Foreground="White"
-              FontWeight="Bold"/>
+      <Button x:Name="btnCancel" Content="Cancel"
+              Width="80" Height="26" Margin="0,0,8,0"/>
+      <Button x:Name="btnOk" Content="OK"
+              Width="80" Height="26"
+              Background="#143D5C" Foreground="White" FontWeight="Bold"/>
     </StackPanel>
   </Grid>
 </Window>"""
 
 
 class ByLayerDialog(forms.WPFWindow):
-    """WPF dialog that lets the user map each DWG layer to a linestyle."""
+    """Dialog that maps each DWG layer to a linestyle via a ComboBox per row."""
 
     def __init__(self, layer_names, linestyle_names):
         forms.WPFWindow.__init__(self, BY_LAYER_XAML, literal_string=True)
         self._ok_clicked = False
-        self._combos     = {}   # {layer_name: ComboBox}
-
-        # Build one row per layer imperatively
-        blank = ['']
-        all_choices = blank + list(linestyle_names)
+        self._combos     = {}
+        all_choices      = [''] + list(linestyle_names)
 
         for layer in layer_names:
-            # Container row
-            row = WpfControls.Grid()
+            row  = WpfControls.Grid()
             col0 = WpfControls.ColumnDefinition()
             col0.Width = Wpf.GridLength(200)
             col1 = WpfControls.ColumnDefinition()
@@ -512,7 +293,6 @@ class ByLayerDialog(forms.WPFWindow):
             row.ColumnDefinitions.Add(col1)
             row.Margin = Wpf.Thickness(0, 3, 0, 3)
 
-            # Layer name label
             lbl = WpfControls.TextBlock()
             lbl.Text              = layer
             lbl.VerticalAlignment = Wpf.VerticalAlignment.Center
@@ -521,13 +301,12 @@ class ByLayerDialog(forms.WPFWindow):
             WpfControls.Grid.SetColumn(lbl, 0)
             row.Children.Add(lbl)
 
-            # Linestyle ComboBox
             combo = WpfControls.ComboBox()
             for choice in all_choices:
                 combo.Items.Add(choice)
-            combo.SelectedIndex   = 0   # blank by default
-            combo.Height          = 22
-            combo.Margin          = Wpf.Thickness(8, 0, 0, 0)
+            combo.SelectedIndex = 0
+            combo.Height        = 22
+            combo.Margin        = Wpf.Thickness(8, 0, 0, 0)
             WpfControls.Grid.SetColumn(combo, 1)
             row.Children.Add(combo)
 
@@ -545,165 +324,420 @@ class ByLayerDialog(forms.WPFWindow):
         self.Close()
 
     def get_mapping(self):
-        """Return {layer_name: linestyle_name} for layers with a selection, or {} if cancelled."""
+        """Return {layer: linestyle} for assigned layers, or {} if cancelled."""
         if not self._ok_clicked:
             return {}
-        result = {}
-        for layer, combo in self._combos.items():
-            chosen = combo.SelectedItem
-            if chosen:
-                result[layer] = chosen
-        return result
+        return {layer: combo.SelectedItem
+                for layer, combo in self._combos.items()
+                if combo.SelectedItem}
 
 
-# ── Mode B entry point ───────────────────────────────────────────────────────
+# ── Style config helpers ─────────────────────────────────────────────────────
 
-def run_mode_b():
-    # 1. Guard: schedule view
-    if isinstance(doc.ActiveView, ViewSchedule):
-        forms.alert(
-            "Please switch to a non-schedule view before running this tool.",
-            exitscript=True
+def ask_style_config(document, import_instance, linestyle_names, allow_by_layer,
+                     step_prefix=''):
+    """
+    Prompt for linestyle assignment mode and return a style_config dict, or None if cancelled.
+    If allow_by_layer=True and user picks By Layer, the By Layer dialog is shown immediately
+    (requires import_instance to be available for layer extraction).
+    """
+    if allow_by_layer:
+        assign_mode = forms.ask_for_one_item(
+            ['Simple (one style for all layers)',
+             'By Layer (assign per DWG layer)'],
+            prompt=step_prefix + "How should linestyles be assigned?",
+            title="Linestyle Assignment"
         )
-        return
-
-    # 2. Pick ImportInstance
-    try:
-        ref = uidoc.Selection.PickObject(
-            ObjectType.Element,
-            ImportInstanceFilter(),
-            "Select an imported or linked DWG file"
-        )
-        import_instance = doc.GetElement(ref.ElementId)
-    except OperationCanceledException:
-        script.exit()
-        return
-    except Exception as ex:
-        forms.alert("Selection failed: " + str(ex), exitscript=True)
-        return
-
-    if not isinstance(import_instance, ImportInstance):
-        forms.alert("Selected element is not an imported DWG. Please try again.", exitscript=True)
-        return
-
-    # 3. Choose line type — restrict options in a family document
-    if doc.IsFamilyDocument:
-        type_choices = ['Detail Line', 'Model Line']
+        if not assign_mode:
+            return None
     else:
-        type_choices = sorted(LINE_TYPE_LABELS.values())
+        assign_mode = 'Simple (one style for all layers)'
+
+    if assign_mode.startswith('Simple'):
+        chosen = forms.SelectFromList.show(
+            linestyle_names,
+            title=step_prefix + "Select Linestyle",
+            prompt="Choose a linestyle for all converted lines:",
+            multiselect=False
+        )
+        if not chosen:
+            return None
+        return {'mode': 'simple', 'style': chosen}
+
+    # By Layer — needs layers from the ImportInstance
+    layer_map = extract_curves_by_layer(import_instance, document)
+    if not layer_map:
+        forms.alert("No geometry layers found in the selected DWG.")
+        return None
+    dlg     = ByLayerDialog(sorted(layer_map.keys()), linestyle_names)
+    dlg.show_dialog()
+    mapping = dlg.get_mapping()
+    if not mapping:
+        return None
+    return {'mode': 'by_layer', 'mapping': mapping}
+
+
+# ---------------------------------------------------------------------------
+# CORE PIPELINE — single DWG processed inside its own family document
+# ---------------------------------------------------------------------------
+
+def process_dwg_to_family(dwg_path, template_path, save_folder,
+                           line_type, style_config, linestyle_names=None):
+    """
+    Full pipeline for one DWG:
+      1. Open family from template
+      2. Import DWG (Transaction 1)
+      3. Resolve by-layer style config if mapping was deferred (shows dialog now)
+      4. Convert to native lines + delete import (Transaction 2)
+      5. Save .rfa and close
+
+    style_config may have mapping=None for by-layer when the dialog should be
+    shown after the import (layers are unknown before import).
+    linestyle_names is required in that case.
+
+    Returns (save_path, None) on success or (None, error_string) on failure.
+    """
+    # Open family doc
+    try:
+        fam_doc = app.NewFamilyDocument(template_path)
+    except Exception as ex:
+        return None, "Could not open template: " + str(ex)
+    if fam_doc is None:
+        return None, "NewFamilyDocument returned None."
+
+    floor_plan = get_ref_level_floor_plan(fam_doc)
+    if floor_plan is None:
+        fam_doc.Close(False)
+        return None, "No 'Ref. Level' floor plan found in template."
+
+    # Transaction 1: Import DWG
+    import_id = None
+    t1 = Transaction(fam_doc, "Import DWG")
+    try:
+        fail_opts = t1.GetFailureHandlingOptions()
+        fail_opts.SetFailuresPreprocessor(WarningSwallower())
+        t1.SetFailureHandlingOptions(fail_opts)
+        t1.Start()
+        dwg_opts           = DWGImportOptions()
+        dwg_opts.Placement = ImportPlacement.Origin
+        import_result      = fam_doc.Import(dwg_path, dwg_opts, floor_plan)
+        # IronPython returns (bool, ElementId) for out-param methods
+        import_id = import_result[1] if isinstance(import_result, tuple) else None
+        t1.Commit()
+    except Exception as ex:
+        try:    t1.RollBack()
+        except Exception: pass
+        try:    fam_doc.Close(False)
+        except Exception: pass
+        return None, "DWG import failed: " + str(ex)
+
+    import_instance = fam_doc.GetElement(import_id) if import_id else None
+    if import_instance is None:
+        fam_doc.Close(False)
+        return None, "ImportInstance not found after import."
+
+    # Resolve deferred by-layer config (dialog shown after import so layers are known)
+    if style_config.get('mode') == 'by_layer' and style_config.get('mapping') is None:
+        layer_map = extract_curves_by_layer(import_instance, fam_doc)
+        if not layer_map:
+            fam_doc.Close(False)
+            return None, "No geometry layers found in DWG."
+        dlg     = ByLayerDialog(sorted(layer_map.keys()), linestyle_names or [])
+        dlg.show_dialog()
+        mapping = dlg.get_mapping()
+        if not mapping:
+            fam_doc.Close(False)
+            return None, "Cancelled by user."
+        effective_config = {'mode': 'by_layer', 'mapping': mapping}
+    else:
+        effective_config = style_config
+
+    # Transaction 2: Convert geometry to lines + delete import
+    t2 = Transaction(fam_doc, "Convert DWG to Lines")
+    try:
+        t2.Start()
+        created, failures = convert_import_to_lines(
+            fam_doc, import_instance, floor_plan, line_type, effective_config)
+        try:
+            fam_doc.Delete(import_id)
+        except Exception:
+            pass
+        t2.Commit()
+    except Exception as ex:
+        try:    t2.RollBack()
+        except Exception: pass
+        try:    fam_doc.Close(False)
+        except Exception: pass
+        return None, "Conversion failed: " + str(ex)
+
+    for fail in failures:
+        output.print_md("  **Warning**: {}".format(fail))
+
+    # Save .rfa
+    rfa_name  = os.path.splitext(os.path.basename(dwg_path))[0] + ".rfa"
+    save_path = os.path.join(save_folder, rfa_name)
+    try:
+        save_opts = SaveAsOptions()
+        save_opts.OverwriteExistingFile = True
+        fam_doc.SaveAs(save_path, save_opts)
+        fam_doc.Close(False)
+    except Exception as ex:
+        try: fam_doc.Close(False)
+        except Exception: pass
+        return None, "Save failed: " + str(ex)
+
+    return save_path, None
+
+
+# ---------------------------------------------------------------------------
+# WORKFLOW A — Project document: guided two-step creation + conversion
+# ---------------------------------------------------------------------------
+
+def run_project_workflow():
+    output.print_md("## DWG Converter — Project Mode")
+
+    # ── STEP 1: Files ────────────────────────────────────────────────────────
+    output.print_md("### Step 1: Select Files and Output Folder")
+
+    template_path = pick_file(
+        "Step 1 of 3 — Select Family Template (.rft)",
+        "Family Templates (*.rft)|*.rft"
+    )
+    if not template_path:
+        forms.alert("No template selected. Operation cancelled.", exitscript=True)
+        return
+    if not os.path.isfile(template_path):
+        forms.alert("Template file not found:\n" + template_path, exitscript=True)
+        return
+
+    dwg_files = pick_file(
+        "Step 2 of 3 — Select DWG File(s) to Convert",
+        "DWG Files (*.dwg)|*.dwg",
+        multi=True
+    )
+    if not dwg_files:
+        forms.alert("No DWG files selected. Operation cancelled.", exitscript=True)
+        return
+
+    save_folder = pick_folder("Step 3 of 3 — Select Output Folder for RFA Families")
+    if not save_folder:
+        forms.alert("No output folder selected. Operation cancelled.", exitscript=True)
+        return
+
+    output.print_md("Template : `{}`".format(os.path.basename(template_path)))
+    output.print_md("DWG count: **{}**".format(len(dwg_files)))
+    output.print_md("Output   : `{}`".format(save_folder))
+
+    # ── STEP 2: Line conversion options ──────────────────────────────────────
+    output.print_md("### Step 2: Configure Line Conversion")
 
     line_type_label = forms.ask_for_one_item(
-        type_choices,
-        prompt="Select the type of Revit lines to create:",
+        ['Detail Line', 'Model Line'],
+        prompt="Step 2a: What type of Revit lines should the DWG geometry become?",
         title="Line Type"
     )
     if not line_type_label:
         script.exit()
         return
-    line_type = LABEL_TO_KEY[line_type_label]
+    line_type = 'detail' if line_type_label == 'Detail Line' else 'model'
 
-    # 4. Validate view supports line type
-    valid, reason = validate_view_for_line_type(doc, line_type)
-    if not valid:
-        forms.alert(reason, exitscript=True)
-        return
-
-    # 5. Assignment mode
-    assign_mode = forms.ask_for_one_item(
-        ['Simple (one style for all layers)', 'By Layer'],
-        prompt="How should linestyles be assigned?",
-        title="Assignment Mode"
-    )
-    if not assign_mode:
-        script.exit()
-        return
-
-    # 6. Collect linestyle names
     linestyle_names = sorted([c.Name for c in get_all_linestyles(doc)])
     if not linestyle_names:
         forms.alert("No linestyles found in the current document.", exitscript=True)
         return
 
-    # 7a. Simple mode
-    if assign_mode.startswith('Simple'):
-        chosen_style = forms.SelectFromList.show(
+    is_batch = len(dwg_files) > 1
+
+    if is_batch:
+        # Batch: simple mode only — one dialog for all DWGs
+        output.print_md("*Batch mode: one linestyle applied to all {} files.*".format(
+            len(dwg_files)))
+        chosen = forms.SelectFromList.show(
             linestyle_names,
-            title="Select Linestyle",
+            title="Step 2b: Select Linestyle (applied to all DWGs)",
             prompt="Choose a linestyle for all converted lines:",
             multiselect=False
         )
-        if not chosen_style:
+        if not chosen:
             script.exit()
             return
-
-        curves = extract_all_curves(import_instance, doc)
-        if not curves:
-            forms.alert("No convertible geometry found in the selected DWG.", exitscript=True)
-            return
-
-        output.print_md("Converting **{}** curves using style **{}**...".format(
-            len(curves), chosen_style))
-
-        t = Transaction(doc, "DWG to Native Lines")
-        t.Start()
-        try:
-            created, failures = convert_simple(doc, doc.ActiveView, curves, chosen_style, line_type)
-            t.Commit()
-        except Exception as ex:
-            try:
-                t.RollBack()
-            except Exception:
-                pass
-            forms.alert("Conversion failed: " + str(ex), exitscript=True)
-            return
-
-    # 7b. By-layer mode
+        style_config   = {'mode': 'simple', 'style': chosen}
+        linestyle_names_for_defer = None
     else:
-        layer_curve_map = extract_curves_by_layer(import_instance, doc)
-        if not layer_curve_map:
-            forms.alert("No convertible geometry found in the selected DWG.", exitscript=True)
-            return
-
-        layer_names = sorted(layer_curve_map.keys())
-        dlg = ByLayerDialog(layer_names, linestyle_names)
-        dlg.show_dialog()
-        layer_style_map = dlg.get_mapping()
-
-        if not layer_style_map:
+        # Single DWG: allow by-layer; defer the dialog until after import
+        assign_mode = forms.ask_for_one_item(
+            ['Simple (one style for all layers)',
+             'By Layer (assign per DWG layer)'],
+            prompt="Step 2b: How should linestyles be assigned?",
+            title="Linestyle Assignment"
+        )
+        if not assign_mode:
             script.exit()
             return
 
-        total_curves = sum(len(v) for v in layer_curve_map.values())
-        output.print_md("Converting **{}** curves across **{}** layers...".format(
-            total_curves, len(layer_style_map)))
+        if assign_mode.startswith('Simple'):
+            chosen = forms.SelectFromList.show(
+                linestyle_names,
+                title="Step 2c: Select Linestyle",
+                prompt="Choose a linestyle for all converted lines:",
+                multiselect=False
+            )
+            if not chosen:
+                script.exit()
+                return
+            style_config              = {'mode': 'simple', 'style': chosen}
+            linestyle_names_for_defer = None
+        else:
+            # Layers are unknown until after the DWG is imported — defer the dialog
+            style_config              = {'mode': 'by_layer', 'mapping': None}
+            linestyle_names_for_defer = linestyle_names
 
-        t = Transaction(doc, "DWG to Native Lines")
-        t.Start()
-        try:
-            created, failures = convert_by_layer(
-                doc, doc.ActiveView, layer_curve_map, layer_style_map, line_type)
-            t.Commit()
-        except Exception as ex:
-            try:
-                t.RollBack()
-            except Exception:
-                pass
-            forms.alert("Conversion failed: " + str(ex), exitscript=True)
-            return
+    # ── STEP 3: Process ───────────────────────────────────────────────────────
+    output.print_md("### Step 3: Processing")
 
-    # 8. Report
-    for fail_msg in failures:
-        output.print_md("**Warning**: {}".format(fail_msg))
+    created_count = 0
+    failed_list   = []
 
-    msg = "Created {} {} line{}.".format(
-        created,
-        LINE_TYPE_LABELS[line_type],
-        "s" if created != 1 else ""
+    for dwg_path in dwg_files:
+        dwg_name = os.path.basename(dwg_path)
+        output.print_md("Processing: **{}**".format(dwg_name))
+
+        save_path, err = process_dwg_to_family(
+            dwg_path, template_path, save_folder,
+            line_type, style_config, linestyle_names_for_defer
+        )
+        if save_path:
+            created_count += 1
+            output.print_md("  Saved: `{}`".format(os.path.basename(save_path)))
+        else:
+            failed_list.append("{} — {}".format(dwg_name, err or "Unknown error"))
+            output.print_md("  **Failed**: {}".format(err or "Unknown error"))
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    msg = "Converted {} DWG{} to native {} lines.\nFamilies saved to:\n{}".format(
+        created_count,
+        "s" if created_count != 1 else "",
+        line_type_label,
+        save_folder
     )
-    if failures:
-        msg += "\n{} curve(s) could not be converted — see output for details.".format(
-            len(failures))
+    if failed_list:
+        msg += "\n\nFailed ({}):\n- {}".format(len(failed_list), "\n- ".join(failed_list))
     forms.alert(msg)
+
+
+# ---------------------------------------------------------------------------
+# WORKFLOW B — Family Editor: convert existing ImportInstance in open family
+# ---------------------------------------------------------------------------
+
+def run_family_editor_workflow():
+    output.print_md("## DWG Converter — Family Editor Mode")
+
+    # Find all ImportInstances in the open family
+    imports = list(
+        FilteredElementCollector(doc)
+        .OfClass(ImportInstance)
+        .WhereElementIsNotElementType()
+        .ToElements()
+    )
+
+    if not imports:
+        forms.alert(
+            "No imported DWG files found in this family.\n\n"
+            "Use Insert → Import CAD to import a DWG first, "
+            "then run this tool again.",
+            exitscript=True
+        )
+        return
+
+    # Select import — auto if only one, otherwise let user choose
+    if len(imports) == 1:
+        import_instance = imports[0]
+    else:
+        names   = [imp.Category.Name if imp.Category else "Unnamed ({})".format(imp.Id)
+                   for imp in imports]
+        chosen_name = forms.ask_for_one_item(
+            names,
+            prompt="Multiple imported DWGs found. Select one to convert:",
+            title="Select DWG Import"
+        )
+        if not chosen_name:
+            script.exit()
+            return
+        import_instance = imports[names.index(chosen_name)]
+
+    active_view = doc.ActiveView
+    if isinstance(active_view, ViewSchedule):
+        forms.alert("Please switch to a floor plan view first.", exitscript=True)
+        return
+
+    output.print_md("Selected import: **{}**".format(
+        import_instance.Category.Name if import_instance.Category else "Unnamed"))
+
+    # ── Step 1: Line type ─────────────────────────────────────────────────────
+    line_type_label = forms.ask_for_one_item(
+        ['Detail Line', 'Model Line'],
+        prompt="Step 1: What type of Revit lines should the DWG geometry become?",
+        title="Line Type"
+    )
+    if not line_type_label:
+        script.exit()
+        return
+    line_type = 'detail' if line_type_label == 'Detail Line' else 'model'
+
+    # ── Step 2: Linestyle assignment ──────────────────────────────────────────
+    linestyle_names = sorted([c.Name for c in get_all_linestyles(doc)])
+    if not linestyle_names:
+        forms.alert("No linestyles found in this family document.", exitscript=True)
+        return
+
+    style_config = ask_style_config(
+        doc, import_instance, linestyle_names,
+        allow_by_layer=True,
+        step_prefix="Step 2: "
+    )
+    if style_config is None:
+        script.exit()
+        return
+
+    # ── Convert ───────────────────────────────────────────────────────────────
+    output.print_md("### Converting...")
+
+    t = Transaction(doc, "DWG to Native Lines")
+    t.Start()
+    try:
+        created, failures = convert_import_to_lines(
+            doc, import_instance, active_view, line_type, style_config)
+        t.Commit()
+    except Exception as ex:
+        try:    t.RollBack()
+        except Exception: pass
+        forms.alert("Conversion failed: " + str(ex), exitscript=True)
+        return
+
+    for fail in failures:
+        output.print_md("**Warning**: {}".format(fail))
+
+    output.print_md("Created **{}** {} line{}.".format(
+        created, line_type_label, "s" if created != 1 else ""))
+
+    # ── Offer to delete the original import ───────────────────────────────────
+    msg = "Created {} {} line{}.\n\nDelete the original DWG import from this family?".format(
+        created, line_type_label, "s" if created != 1 else "")
+    if failures:
+        msg = "{} curve(s) could not be converted (see output panel).\n\n".format(
+            len(failures)) + msg
+
+    if forms.alert(msg, yes=True, no=True):
+        t_del = Transaction(doc, "Delete DWG Import")
+        t_del.Start()
+        try:
+            doc.Delete(import_instance.Id)
+            t_del.Commit()
+            output.print_md("Original DWG import deleted.")
+        except Exception as ex:
+            try:    t_del.RollBack()
+            except Exception: pass
+            output.print_md("**Could not delete import**: {}".format(str(ex)))
 
 
 # ---------------------------------------------------------------------------
@@ -712,21 +746,19 @@ def run_mode_b():
 
 def main():
     if doc is None:
-        forms.alert("No document is open. Please open a project or family first.", exitscript=True)
+        forms.alert("No document is open. Please open a project or family first.",
+                    exitscript=True)
         return
 
-    selected = forms.CommandSwitchWindow.show(
-        ['DWG to Detail Family (.rfa)', 'DWG to Native Revit Lines'],
-        message='Select conversion mode:'
-    )
-    if not selected:
-        script.exit()
-        return
-
-    if selected == 'DWG to Detail Family (.rfa)':
-        run_mode_a()
+    if doc.IsFamilyDocument:
+        run_family_editor_workflow()
     else:
-        run_mode_b()
+        if isinstance(doc.ActiveView, ViewSchedule):
+            forms.alert(
+                "Please switch to a non-schedule view before running this tool.",
+                exitscript=True)
+            return
+        run_project_workflow()
 
 
 main()
