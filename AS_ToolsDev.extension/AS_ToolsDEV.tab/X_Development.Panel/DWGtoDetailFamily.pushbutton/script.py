@@ -25,6 +25,7 @@ from Autodesk.Revit.DB import (
     IFailuresPreprocessor, FailureProcessingResult, FailureSeverity,
     Options, GeometryInstance, PolyLine, Curve, Line,
     GraphicsStyleType, ViewSchedule, ImportInstance, CurveArray,
+    SketchPlane, Plane, XYZ,
 )
 from Autodesk.Revit.UI.Selection import ISelectionFilter, ObjectType
 from Autodesk.Revit.Exceptions import OperationCanceledException
@@ -335,6 +336,10 @@ def create_line(document, view, curve, line_type):
 
     if line_type == 'model':
         sp = view.SketchPlane
+        if sp is None:
+            # Family views may not have a sketch plane set — create one on XY plane at Z=0
+            plane = Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero)
+            sp = SketchPlane.Create(document, plane)
         if is_family:
             return document.FamilyCreate.NewModelCurve(curve, sp)
         return document.Create.NewModelCurve(curve, sp)
@@ -581,9 +586,14 @@ def run_mode_b():
         forms.alert("Selected element is not an imported DWG. Please try again.", exitscript=True)
         return
 
-    # 3. Choose line type
+    # 3. Choose line type — restrict options in a family document
+    if doc.IsFamilyDocument:
+        type_choices = ['Detail Line', 'Model Line']
+    else:
+        type_choices = sorted(LINE_TYPE_LABELS.values())
+
     line_type_label = forms.ask_for_one_item(
-        sorted(LINE_TYPE_LABELS.values()),
+        type_choices,
         prompt="Select the type of Revit lines to create:",
         title="Line Type"
     )
@@ -701,6 +711,10 @@ def run_mode_b():
 # ---------------------------------------------------------------------------
 
 def main():
+    if doc is None:
+        forms.alert("No document is open. Please open a project or family first.", exitscript=True)
+        return
+
     selected = forms.CommandSwitchWindow.show(
         ['DWG to Detail Family (.rfa)', 'DWG to Native Revit Lines'],
         message='Select conversion mode:'

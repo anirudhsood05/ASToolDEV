@@ -9,4 +9,3 @@ tooltip: >-
   current view into native Revit lines (Detail, Model, Area Boundary,
   Room Separation, or Space Boundary) with simple or per-layer style mapping.
 author: AS Tools
-context: doc-project
