@@ -1,0 +1,43 @@
+
+-------------------------------------------------------------------------------
+   ROBOCOPY     ::     Robust File Copy for Windows                              
+-------------------------------------------------------------------------------
+
+  Started : 08 May 2026 09:19:49
+   Source : H:\ShellFolders\Documents\GitHub\ASToolDEV\AS_ToolsDev.extension\
+     Dest : I:\002_BIM\007_Addins\Aukett Swanke\Extensions\ASToolDEV\AS_ToolsDev.extension\
+
+    Files : *.*
+	    
+Exc Files : Thumbs.db
+	    .DS_Store
+	    *.pyc
+	    *.pyo
+	    *.log
+	    
+ Exc Dirs : __pycache__
+	    .git
+	    .vscode
+	    .idea
+	    
+  Options : *.* /NDL /S /E /DCOPY:DA /COPY:DAT /PURGE /MIR /NP /R:1000000 /W:30 
+
+------------------------------------------------------------------------------
+
+	  *EXTRA File 		     495	I:\002_BIM\007_Addins\Aukett Swanke\Extensions\ASToolDEV\AS_ToolsDev.extension\.gitignore
+	    New File  		     233	H:\ShellFolders\Documents\GitHub\ASToolDEV\AS_ToolsDev.extension\AS_ToolsDEV.tab\X_Development.Panel\DWGtoDetailFamily.pushbutton\bundle.yaml
+	    New File  		    7034	H:\ShellFolders\Documents\GitHub\ASToolDEV\AS_ToolsDev.extension\AS_ToolsDEV.tab\X_Development.Panel\DWGtoDetailFamily.pushbutton\script.py
+
+------------------------------------------------------------------------------
+
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :       151         1       150         0         0         2
+   Files :       553         2       551         0         0         1
+   Bytes :    9.68 m     7.0 k    9.67 m         0         0       495
+   Times :   0:00:02   0:00:00                       0:00:00   0:00:02
+
+
+   Speed :              47,496 Bytes/sec.
+   Speed :               2.718 MegaBytes/min.
+   Ended : 08 May 2026 09:19:52
+
