@@ -1,0 +1,11 @@
+title: >-
+  DWG
+  Converter
+tooltip: >-
+  Guided DWG-to-native-lines converter.
+  Project mode: pick a template, DWG files, and output folder, then configure
+  line type and linestyle — the tool creates each family, converts the DWG to
+  native Revit lines, and saves a clean .rfa.
+  Family Editor mode: select the imported DWG in the open family and convert
+  it to native Detail or Model lines in place.
+author: AS Tools
