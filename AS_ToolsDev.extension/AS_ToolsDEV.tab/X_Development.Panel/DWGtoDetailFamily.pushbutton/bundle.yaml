@@ -9,4 +9,3 @@ tooltip: >-
   Family Editor mode: select the imported DWG in the open family and convert
   it to native Detail or Model lines in place.
 author: AS Tools
-context: zero-doc
