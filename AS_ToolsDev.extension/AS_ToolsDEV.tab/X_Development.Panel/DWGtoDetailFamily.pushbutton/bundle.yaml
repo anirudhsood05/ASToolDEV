@@ -1,8 +1,12 @@
 title: >-
-  DWG to
-  Detail Family
+  DWG
+  Converter
 tooltip: >-
-  Batch-converts DWG files into Revit detail item families (.rfa).
-  Select a family template, one or more DWG files, and an output folder.
+  Two-mode DWG converter.
+  Mode A — DWG to Detail Family: batch-converts DWG files into Revit
+  detail item families (.rfa). Pick a template, DWG files, and output folder.
+  Mode B — DWG to Native Lines: converts an imported/linked DWG in the
+  current view into native Revit lines (Detail, Model, Area Boundary,
+  Room Separation, or Space Boundary) with simple or per-layer style mapping.
 author: AS Tools
 context: doc-project
