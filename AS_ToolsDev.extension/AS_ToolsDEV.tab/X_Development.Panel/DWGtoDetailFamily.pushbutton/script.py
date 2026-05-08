@@ -31,9 +31,9 @@ from Autodesk.Revit.Exceptions import OperationCanceledException
 
 from pyrevit import revit, forms, script
 
-app    = revit.app
 uidoc  = revit.uidoc
 doc    = revit.doc
+app    = doc.Application
 output = script.get_output()
 
 # ---------------------------------------------------------------------------
