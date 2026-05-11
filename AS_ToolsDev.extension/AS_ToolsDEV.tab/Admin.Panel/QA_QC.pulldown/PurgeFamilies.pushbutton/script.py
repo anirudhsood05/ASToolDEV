@@ -5,6 +5,8 @@
 __title__ = 'Purge\nfamilies'
 __doc__ = """Reduce model size by purging loaded families recursively.
 Supports workshared models - attempts to check out each family before editing.
+Purged families are reloaded back into the active project so the project keeps
+the same set of families but at a reduced internal size.
 A cancel window appears on run - click Cancel to stop gracefully at the next safe point."""
 __helpurl__ = "https://apex-project.github.io/pyApex/help#purge-families"
 
@@ -27,10 +29,9 @@ clr.AddReference('WindowsBase')
 clr.AddReference('System.Xaml')
 
 from System.IO import StringReader
-from System.Windows import Window, WindowStartupLocation, Thickness, HorizontalAlignment
+from System.Windows import Window
 from System.Windows.Markup import XamlReader
 from System.Windows.Threading import DispatcherFrame, Dispatcher, DispatcherPriority
-from System.Windows.Media import SolidColorBrush, Color
 from System.Collections.Generic import List
 from System import Action
 
@@ -45,7 +46,7 @@ from Autodesk.Revit.DB import (
     RelinquishOptions, WorksharingUtils
 )
 
-# Workshared checkout support
+# Optional API surfaces - guard for version differences
 try:
     from Autodesk.Revit.DB import CheckoutStatus
     HAS_CHECKOUT_STATUS = True
@@ -72,33 +73,40 @@ my_config = script.get_config()
 
 try:
     locale.setlocale(locale.LC_ALL, '')
-except:
+except Exception:
     pass
 
 window_title = __title__.replace("\n", " ")
 try:
     output.set_title(window_title)
-except:
+except Exception:
     pass
 
 
 def dbg(msg):
     try:
         print("[PurgeFamilies] %s" % msg)
-    except:
+    except Exception:
         pass
 
 
-# -------------------- Workshared state --------------------
+# -------------------- Runtime state --------------------
 IS_WORKSHARED = False
-CHECKED_OUT_IDS = []  # Track what we checked out so we can relinquish at end
+CHECKED_OUT_IDS = []     # Track what we checked out so we can relinquish at end
 SYNC_AT_END = False
-
-
-# -------------------- Cancel window (modeless WPF) --------------------
 CANCEL_REQUESTED = False
 _CANCEL_WIN = None
 
+PURGE_RESULTS_CSV = []
+START_TIME = None
+PURGE_RESULTS = {}
+PURGE_SIZES_SUM = 0.0
+SKIPPED_NOT_OWNED = []   # Families skipped because owned by others
+RELOADED_COUNT = 0       # Families successfully reloaded back to host
+RELOAD_FAILED = []       # Families that could not be reloaded back
+
+
+# -------------------- Cancel window (modeless WPF) --------------------
 CANCEL_XAML = u"""<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Purge Families - Running"
@@ -142,20 +150,34 @@ def _on_cancel_click(sender, args):
     try:
         sender.IsEnabled = False
         sender.Content = "Cancelling..."
-    except:
+    except Exception:
         pass
     try:
         if _CANCEL_WIN is not None:
             txt = _CANCEL_WIN.FindName("statusText")
             if txt is not None:
                 txt.Text = "Cancelling - finishing current family safely..."
-    except:
+    except Exception:
         pass
 
 
 def _on_cancel_closing(sender, args):
     global CANCEL_REQUESTED
     CANCEL_REQUESTED = True
+
+
+def _pump_dispatcher():
+    try:
+        frame = DispatcherFrame()
+
+        def exit_frame():
+            frame.Continue = False
+
+        Dispatcher.CurrentDispatcher.BeginInvoke(
+            DispatcherPriority.Background, Action(exit_frame))
+        Dispatcher.PushFrame(frame)
+    except Exception:
+        pass
 
 
 def show_cancel_window():
@@ -184,7 +206,7 @@ def update_cancel_status(msg):
         if txt is not None:
             txt.Text = msg
         _pump_dispatcher()
-    except:
+    except Exception:
         pass
 
 
@@ -195,26 +217,12 @@ def close_cancel_window():
     try:
         try:
             _CANCEL_WIN.Closing -= _on_cancel_closing
-        except:
+        except Exception:
             pass
         _CANCEL_WIN.Close()
-    except:
+    except Exception:
         pass
     _CANCEL_WIN = None
-
-
-def _pump_dispatcher():
-    try:
-        frame = DispatcherFrame()
-
-        def exit_frame():
-            frame.Continue = False
-
-        Dispatcher.CurrentDispatcher.BeginInvoke(
-            DispatcherPriority.Background, Action(exit_frame))
-        Dispatcher.PushFrame(frame)
-    except:
-        pass
 
 
 def cancelled():
@@ -226,13 +234,14 @@ def cancelled():
 def eid_int(eid):
     if eid is None:
         return -1
+    # Revit 2024+ uses .Value (Int64); earlier uses .IntegerValue
     try:
         return int(eid.Value)
-    except:
+    except Exception:
         pass
     try:
         return int(eid.IntegerValue)
-    except:
+    except Exception:
         pass
     return -1
 
@@ -243,11 +252,11 @@ def safe_name(element):
     try:
         from Autodesk.Revit.DB import Element as _Element
         return _Element.Name.GetValue(element)
-    except:
+    except Exception:
         pass
     try:
         return element.Name
-    except:
+    except Exception:
         return "<unnamed>"
 
 
@@ -256,6 +265,45 @@ def is_string(v):
         return isinstance(v, (str, unicode))
     except NameError:
         return isinstance(v, str)
+
+
+def doc_is_valid(d):
+    if d is None:
+        return False
+    try:
+        return bool(d.IsValidObject)
+    except Exception:
+        return False
+
+
+def doc_is_workshared(d):
+    try:
+        return bool(d.IsWorkshared)
+    except Exception:
+        return False
+
+
+# -------------------- Transaction helper --------------------
+def run_in_transaction(document, name, func):
+    """Run func() inside a transaction. Rolls back on error. Returns (ok, result)."""
+    if not doc_is_valid(document):
+        return False, None
+    t = Transaction(document, name)
+    started = False
+    try:
+        t.Start()
+        started = True
+        result = func()
+        t.Commit()
+        return True, result
+    except Exception as e:
+        logger.debug("Transaction '%s' failed: %s" % (name, str(e)))
+        if started:
+            try:
+                t.RollBack()
+            except Exception:
+                pass
+        return False, None
 
 
 # -------------------- Workshared helpers --------------------
@@ -279,14 +327,13 @@ def get_checkout_status(document, element_id):
 
 
 def get_element_owner(document, element_id):
-    """Get username of element owner, or empty string"""
     if not IS_WORKSHARED:
         return ""
     try:
         info = WorksharingUtils.GetWorksharingTooltipInfo(document, element_id)
         if info is not None:
             return info.Owner or ""
-    except:
+    except Exception:
         pass
     return ""
 
@@ -306,7 +353,7 @@ def try_checkout(document, element_id):
     try:
         id_list = List[ElementId]()
         id_list.Add(element_id)
-        result = WorksharingUtils.CheckoutElements(document, id_list)
+        WorksharingUtils.CheckoutElements(document, id_list)
         # Verify we actually got it (CheckoutElements doesn't always raise on failure)
         if get_checkout_status(document, element_id) == 'owned':
             CHECKED_OUT_IDS.append(eid_int(element_id))
@@ -317,7 +364,6 @@ def try_checkout(document, element_id):
 
 
 def relinquish_all_checked_out(document):
-    """Release checkouts we took (but preserve any changes already synced)"""
     if not IS_WORKSHARED:
         return
     try:
@@ -328,7 +374,7 @@ def relinquish_all_checked_out(document):
         opts.UserCreatedWorksets = False
         try:
             opts.StandardWorksets = False
-        except:
+        except Exception:
             pass
         WorksharingUtils.RelinquishOwnership(document, opts, None)
         dbg("Released checked-out elements")
@@ -337,7 +383,6 @@ def relinquish_all_checked_out(document):
 
 
 def sync_with_central(document):
-    """Sync workshared document to central"""
     if not IS_WORKSHARED:
         return True
     try:
@@ -370,14 +415,14 @@ def config_temp_dir():
     v = None
     try:
         v = my_config.temp_dir
-    except:
+    except Exception:
         v = None
     if v is None:
         v = default_dir
         try:
             my_config.temp_dir = v
             script.save_config()
-        except:
+        except Exception:
             pass
     if isinstance(v, list):
         v = v[0] if v else default_dir
@@ -392,16 +437,10 @@ try:
     for _c in BuiltInCategory.GetValues(BuiltInCategory):
         try:
             BUILTINCATEGORIES_DICT[int(_c)] = _c
-        except:
+        except Exception:
             continue
-except:
+except Exception:
     pass
-
-PURGE_RESULTS_CSV = []
-START_TIME = None
-PURGE_RESULTS = {}
-PURGE_SIZES_SUM = 0.0
-SKIPPED_NOT_OWNED = []  # Families skipped because owned by others
 
 
 # -------------------- Utils --------------------
@@ -420,7 +459,7 @@ def file_size_mb(f):
         return 0.0
     try:
         return float(os.stat(f).st_size) / (1024.0 * 1024.0)
-    except:
+    except Exception:
         return 0.0
 
 
@@ -433,14 +472,14 @@ def time_elapsed():
 def roundup(x):
     try:
         return int(math.ceil(x / 10.0)) * 10
-    except:
+    except Exception:
         return 0
 
 
 def time_format(t):
     try:
         t = float(t)
-    except:
+    except Exception:
         return "0 sec"
     if t < 60:
         return "%d sec" % t
@@ -473,7 +512,7 @@ def safe_remove(path, retries=3, delay=0.3):
         try:
             os.remove(path)
             return True
-        except:
+        except Exception:
             time.sleep(delay)
     return False
 
@@ -486,22 +525,6 @@ def sanitise_filename(s):
     return s.strip() or "unnamed"
 
 
-def doc_is_valid(d):
-    if d is None:
-        return False
-    try:
-        return bool(d.IsValidObject)
-    except:
-        return False
-
-
-def doc_is_workshared(d):
-    try:
-        return bool(d.IsWorkshared)
-    except:
-        return False
-
-
 # -------------------- Dependency analysis --------------------
 def dependencies_find(document, element, result=None):
     if result is None:
@@ -511,12 +534,12 @@ def dependencies_find(document, element, result=None):
     try:
         if not element.IsValidObject:
             return result
-    except:
+    except Exception:
         return result
 
     try:
         params = element.Parameters
-    except:
+    except Exception:
         params = None
 
     if params:
@@ -527,7 +550,7 @@ def dependencies_find(document, element, result=None):
                 try:
                     if p.StorageType != StorageType.ElementId:
                         continue
-                except:
+                except Exception:
                     continue
                 eid = p.AsElementId()
                 e_id_child = eid_int(eid)
@@ -535,7 +558,7 @@ def dependencies_find(document, element, result=None):
                     result.append(e_id_child)
                     try:
                         e_child = document.GetElement(eid)
-                    except:
+                    except Exception:
                         e_child = None
                     if e_child is not None:
                         ct = type(e_child)
@@ -546,16 +569,16 @@ def dependencies_find(document, element, result=None):
                                 fam = e_child.Family
                                 if fam is not None:
                                     result.append(eid_int(fam.Id))
-                            except:
+                            except Exception:
                                 pass
-            except:
+            except Exception:
                 continue
 
     try:
         tid = eid_int(element.GetTypeId())
         if tid > 0:
             result.append(tid)
-    except:
+    except Exception:
         pass
 
     try:
@@ -564,7 +587,7 @@ def dependencies_find(document, element, result=None):
             ls_int = eid_int(ls.Id)
             if ls_int > 0:
                 result.append(ls_int)
-    except:
+    except Exception:
         pass
 
     return result
@@ -577,7 +600,7 @@ def _is_family_type_parameter(param):
         if HAS_PARAMETER_TYPE and ParameterType is not None:
             if param.Definition.ParameterType == ParameterType.FamilyType:
                 return True
-    except:
+    except Exception:
         pass
     try:
         defn = param.Definition
@@ -587,9 +610,9 @@ def _is_family_type_parameter(param):
             try:
                 if 'familyType' in str(dt.TypeId).lower():
                     return True
-            except:
+            except Exception:
                 pass
-    except:
+    except Exception:
         pass
     return False
 
@@ -598,11 +621,13 @@ def dependencies_structure(document):
     result = {}
     elements = []
     try:
-        elements = list(FilteredElementCollector(document).WhereElementIsNotElementType().ToElements())
+        elements = list(FilteredElementCollector(document)
+                        .WhereElementIsNotElementType().ToElements())
     except Exception as e:
         logger.error("Collect instances failed: %s" % str(e))
     try:
-        elements += list(FilteredElementCollector(document).WhereElementIsElementType().ToElements())
+        elements += list(FilteredElementCollector(document)
+                         .WhereElementIsElementType().ToElements())
     except Exception as e:
         logger.error("Collect types failed: %s" % str(e))
 
@@ -616,7 +641,7 @@ def dependencies_structure(document):
             childs = dependencies_find(document, e)
             if childs:
                 result.setdefault(e_id, []).extend(childs)
-        except:
+        except Exception:
             continue
 
     inv = invert_dict_of_lists(result)
@@ -629,20 +654,14 @@ def dependencies_structure(document):
             if mgr is not None:
                 try:
                     params = mgr.Parameters
-                except:
+                except Exception:
                     params = None
                 if params:
-                    fam_params = []
-                    for p in params:
-                        try:
-                            if _is_family_type_parameter(p):
-                                fam_params.append(p)
-                        except:
-                            continue
+                    fam_params = [p for p in params if _is_family_type_parameter(p)]
                     if fam_params:
                         try:
                             doc_types = mgr.Types
-                        except:
+                        except Exception:
                             doc_types = []
                         found_params = []
                         categories = []
@@ -657,7 +676,7 @@ def dependencies_structure(document):
                                         if cat is not None:
                                             categories.append(cat)
                                         found_params.append(p)
-                                except:
+                                except Exception:
                                     continue
                         for c in categories:
                             try:
@@ -666,12 +685,13 @@ def dependencies_structure(document):
                                 for x in cat_elems:
                                     try:
                                         is_fs = (type(x) == FamilySymbol) or (
-                                            AnnotationSymbolType is not None and type(x) == AnnotationSymbolType)
+                                            AnnotationSymbolType is not None
+                                            and type(x) == AnnotationSymbolType)
                                         if is_fs and x.Family is not None:
                                             inv_set.add(eid_int(x.Family.Id))
-                                    except:
+                                    except Exception:
                                         continue
-                            except:
+                            except Exception:
                                 continue
     except Exception as e:
         logger.debug("Family param processing error: %s" % str(e))
@@ -681,9 +701,7 @@ def dependencies_structure(document):
 
 # -------------------- Family collection --------------------
 class FamilyLoadOption(IFamilyLoadOptions):
-    def __init__(self):
-        pass
-
+    """Always overwrite existing family + parameter values when reloading."""
     def OnFamilyFound(self, familyInUse, overwriteParameterValues):
         return True
 
@@ -719,7 +737,7 @@ def get_familysymbol_instances(document, fs):
                     lfam = getattr(legend_fs, 'Family', None)
                     if lfam is not None and eid_int(lfam.Id) == target_fam_int:
                         instances.add(e)
-                except:
+                except Exception:
                     continue
     except Exception as e:
         logger.debug("Legend scan error: %s" % str(e))
@@ -728,12 +746,11 @@ def get_familysymbol_instances(document, fs):
 
 
 def get_families(document):
-    used = []
-    not_used = []
+    used, not_used = [], []
     try:
         from Autodesk.Revit.DB import Family
-        fam_collector = FilteredElementCollector(document).OfClass(Family)
-        all_families = list(fam_collector.ToElements())
+        all_families = list(FilteredElementCollector(document)
+                            .OfClass(Family).ToElements())
         dbg("get_families: found %d Family elements" % len(all_families))
     except Exception as e:
         logger.error("get_families: Family collector failed: %s" % str(e))
@@ -746,18 +763,18 @@ def get_families(document):
             try:
                 if not fam.IsValidObject:
                     continue
-            except:
+            except Exception:
                 continue
             try:
                 if fam.IsInPlace:
                     continue
-            except:
+            except Exception:
                 pass
 
             total_instances = 0
             try:
                 symbol_ids = fam.GetFamilySymbolIds()
-            except:
+            except Exception:
                 symbol_ids = None
 
             if symbol_ids is not None:
@@ -767,7 +784,7 @@ def get_families(document):
                         if sym is None:
                             continue
                         total_instances += len(get_familysymbol_instances(document, sym))
-                    except:
+                    except Exception:
                         continue
 
             if total_instances > 0:
@@ -792,16 +809,14 @@ def filter_elements_by_dependencies(document, els, deps):
                 in_use.append(e)
             else:
                 not_in_use.append(e)
-        except:
+        except Exception:
             continue
     return in_use, not_in_use
 
 
-# -------------------- Save / purge --------------------
+# -------------------- Save / purge / reload --------------------
 def save_family(fam_doc, directory, after=False):
-    if not doc_is_valid(fam_doc):
-        return None, None
-    if not is_string(directory):
+    if not doc_is_valid(fam_doc) or not is_string(directory):
         return None, None
 
     if after:
@@ -811,7 +826,7 @@ def save_family(fam_doc, directory, after=False):
 
     fam_file = fam_doc.Title or "unnamed.rfa"
     if not fam_file.lower().endswith(".rfa"):
-        fam_file = fam_file + ".rfa"
+        fam_file += ".rfa"
 
     fam_save_path = os.path.join(directory, fam_file)
 
@@ -828,7 +843,7 @@ def save_family(fam_doc, directory, after=False):
 
 
 def purge_families_in_doc(document, families_not_used):
-    """Purge families. In workshared docs, only deletes ones we own."""
+    """Delete unused families. In workshared docs, only deletes ones we own."""
     not_purged = []
     count = 0
     for f in families_not_used:
@@ -838,39 +853,52 @@ def purge_families_in_doc(document, families_not_used):
             try:
                 if f.IsInPlace:
                     continue
-            except:
+            except Exception:
                 pass
 
-            # In workshared docs, we must own the family to delete it
-            if IS_WORKSHARED:
-                if not try_checkout(document, f.Id):
-                    not_purged.append(f)
-                    continue
+            if IS_WORKSHARED and not try_checkout(document, f.Id):
+                not_purged.append(f)
+                continue
 
             document.Delete(f.Id)
             count += 1
-        except:
+        except Exception:
             not_purged.append(f)
     return count, len(families_not_used), not_purged
 
 
-def load_family_back(fam_doc, target_doc):
+def load_family_back(fam_doc, target_doc, fam_name=None):
+    """Reload the purged family back into target_doc so the project keeps it.
+    Returns True on success. Tries the IFamilyLoadOptions overload first."""
+    global RELOADED_COUNT, RELOAD_FAILED
+    if not doc_is_valid(fam_doc) or not doc_is_valid(target_doc):
+        if fam_name:
+            RELOAD_FAILED.append(fam_name)
+        return False
+
+    # Preferred: pass overwrite options so an existing family is replaced
     try:
         fam_doc.LoadFamily(target_doc, FamilyLoadOption())
+        RELOADED_COUNT += 1
         return True
     except Exception as e:
         logger.debug("LoadFamily(doc, opts) failed: %s" % str(e))
+
+    # Fallback for older API surfaces
     try:
         fam_doc.LoadFamily(target_doc)
+        RELOADED_COUNT += 1
         return True
     except Exception as e:
         logger.debug("LoadFamily(doc) failed: %s" % str(e))
+
+    if fam_name:
+        RELOAD_FAILED.append(fam_name)
     return False
 
 
 # -------------------- CSV --------------------
 def write_csv(path, data=None, separator=";"):
-    global PURGE_RESULTS_CSV
     if data is None:
         data = PURGE_RESULTS_CSV
     if not path or not is_string(path):
@@ -880,7 +908,7 @@ def write_csv(path, data=None, separator=";"):
     for row in data:
         try:
             lines.append(separator.join([str(x) for x in row]))
-        except:
+        except Exception:
             continue
 
     try:
@@ -903,8 +931,170 @@ def create_directory(filename, top_dir, date=True):
 
 
 # -------------------- Recursive purge --------------------
+def _purge_one_family(document, f, level, max_level, directory, skipped_title, tbs, host_is_workshared):
+    """Process a single family: EditFamily -> recursive purge -> reload -> close."""
+    global PURGE_SIZES_SUM
+
+    try:
+        if f is None or not f.IsValidObject or f.IsInPlace or not f.IsEditable:
+            return 0, {}
+    except Exception:
+        return 0, {}
+
+    fam_name = safe_name(f)
+
+    # Workshared: check ownership before attempting to edit
+    if host_is_workshared:
+        status = get_checkout_status(document, f.Id)
+        if status == 'other':
+            owner = get_element_owner(document, f.Id)
+            print(tbs + "SKIP (owned by %s): %s" % (owner or "other user", fam_name))
+            SKIPPED_NOT_OWNED.append((fam_name, owner))
+            return 0, {}
+        elif status == 'free':
+            if not try_checkout(document, f.Id):
+                print(tbs + "SKIP (checkout failed): %s" % fam_name)
+                SKIPPED_NOT_OWNED.append((fam_name, "checkout failed"))
+                return 0, {}
+
+    # Rename if clashes with host doc name (avoid duplicate name on reload)
+    try:
+        doc_base = os.path.splitext(document.Title or "")[0]
+        if fam_name == doc_base:
+            def _rename():
+                f.Name = fam_name + "_"
+                return True
+            ok, _ = run_in_transaction(document, "Rename Family", _rename)
+            if ok:
+                print(tbs + fam_name + " renamed")
+                fam_name = safe_name(f)
+            else:
+                return 0, {}
+    except Exception:
+        pass
+
+    if cancelled():
+        return 0, {}
+
+    fam_doc = None
+    try:
+        fam_doc = document.EditFamily(f)
+    except Exception as e:
+        logger.debug("EditFamily failed '%s': %s" % (fam_name, str(e)))
+        return 0, {}
+
+    if not doc_is_valid(fam_doc):
+        return 0, {}
+    try:
+        if not fam_doc.IsFamilyDocument:
+            fam_doc.Close(False)
+            return 0, {}
+    except Exception:
+        return 0, {}
+
+    sub_dir = None
+    fam_save_path = None
+    fam_file = None
+    if directory and is_string(directory):
+        try:
+            fam_save_path, fam_file = save_family(fam_doc, directory)
+            if fam_save_path is None:
+                try:
+                    fam_doc.Close(False)
+                except Exception:
+                    pass
+                return 0, {}
+            base = fam_file[:-4] if fam_file.lower().endswith(".rfa") else fam_file
+            sub_dir = os.path.join(str(directory), sanitise_filename(base[:32]))
+        except Exception as e:
+            print(tbs + "Save error: %s - %s" % (fam_doc.Title, str(e)))
+            try:
+                fam_doc.Close(False)
+            except Exception:
+                pass
+            return 0, {}
+
+    child_purged = 0
+    child_by_func = {}
+    try:
+        fam_doc, child_purged, child_by_func = process_purge(
+            fam_doc, parent=document,
+            level=level + 1, max_level=max_level,
+            directory=sub_dir, skipped_title=skipped_title
+        )
+    except Exception as e:
+        print(tbs + "Recursive purge error '%s': %s" % (fam_name, str(e)))
+        try:
+            fam_doc.Close(False)
+        except Exception:
+            pass
+        return 0, {}
+
+    fam_by_func = {}
+    for pk in child_by_func:
+        fam_by_func[pk] = fam_by_func.get(pk, 0) + child_by_func[pk]
+
+    if sub_dir and is_string(sub_dir) and os.path.exists(sub_dir):
+        try:
+            if not os.listdir(sub_dir):
+                os.rmdir(sub_dir)
+        except Exception:
+            pass
+
+    size_before, size_after, size_diff = 0.0, 0.0, 0.0
+    if directory and fam_save_path and os.path.exists(fam_save_path):
+        size_before = file_size_mb(fam_save_path)
+        if child_purged > 0:
+            _p2, _f2 = save_family(fam_doc, directory, after=True)
+            if _p2 and os.path.exists(_p2):
+                size_after = file_size_mb(_p2)
+                size_diff = size_after - size_before
+                if size_diff != 0:
+                    try:
+                        pct = -(1 - size_after / size_before) * 100 if size_before > 0 else 0
+                        print(tbs + "\t%.3f Mb (%.3f -> %.3f, %d%%)" %
+                              (size_diff, size_before, size_after, pct))
+                        PURGE_SIZES_SUM += size_diff
+                    except Exception:
+                        pass
+        else:
+            safe_remove(fam_save_path)
+
+    try:
+        fam_type = str(fam_doc.OwnerFamily.FamilyCategory.Name)
+    except Exception:
+        fam_type = "Not family"
+
+    try:
+        csv_row = [
+            str(level), fam_type,
+            fam_doc.Title or "<untitled>",
+            locale.str(size_before),
+            locale.str(size_after),
+            locale.str(size_diff)
+        ]
+        for pk in fam_by_func:
+            csv_row.append(str(fam_by_func[pk]))
+        PURGE_RESULTS_CSV.append(csv_row)
+    except Exception:
+        pass
+
+    # Reload only if smaller (something was actually purged) and not cancelled.
+    # This ensures the project keeps the same families but with reduced size.
+    if size_diff < 0 and not cancelled():
+        if not load_family_back(fam_doc, document, fam_name):
+            print(tbs + "WARNING: failed to reload '%s' back to host" % fam_name)
+
+    try:
+        fam_doc.Close(False)
+    except Exception:
+        pass
+
+    return child_purged, fam_by_func
+
+
 def process_purge(document, parent=None, level=0, max_level=1, directory=None, skipped_title=None):
-    global PURGE_RESULTS, PURGE_SIZES_SUM, PURGE_RESULTS_CSV, START_TIME, SKIPPED_NOT_OWNED
+    global PURGE_RESULTS, PURGE_RESULTS_CSV, START_TIME
 
     if not isinstance(document, Document) or not doc_is_valid(document):
         return document, 0, {}
@@ -926,9 +1116,6 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
     by_func = {}
     title_printed = False
     tbs = "\t" * level
-
-    # Workshared only applies to the host document, not to family docs opened via EditFamily
-    # (family docs are always local, never workshared themselves)
     host_is_workshared = (level == 0) and IS_WORKSHARED
 
     if not skipped_title:
@@ -940,6 +1127,7 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
         title_printed = True
         START_TIME = time.time()
 
+    # Nested family docs: prune unused families via dep analysis + delete
     if level > 0:
         if cancelled():
             return document, 0, {}
@@ -955,12 +1143,11 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
         families_in_use = list(set(families_in_use + in_use))
 
         if families_not_in_use and not cancelled():
-            t = Transaction(document, "Purge Families")
-            started = False
-            try:
-                t.Start()
-                started = True
-                cnt, found, failed = purge_families_in_doc(document, families_not_in_use)
+            def _do_purge():
+                return purge_families_in_doc(document, families_not_in_use)
+            ok, res = run_in_transaction(document, "Purge Families", _do_purge)
+            if ok and res is not None:
+                cnt, found, failed = res
                 families_in_use += failed
                 purged_count += cnt
                 if found > 0 or cnt > 0:
@@ -974,15 +1161,6 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
                         print(tbs + "\tFamilies -%d of %d" % (cnt, found))
                     else:
                         print(tbs + "\tFamilies -%d" % cnt)
-                t.Commit()
-                started = False
-            except Exception as e:
-                logger.error("Purge tx failed in '%s': %s" % (document.Title, str(e)))
-                if started:
-                    try:
-                        t.RollBack()
-                    except:
-                        pass
 
     families_in_use = list(set(families_in_use))
     total_families = len(families_in_use)
@@ -997,13 +1175,13 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
         for idx in range(len(families_in_use)):
             try:
                 _csv.append([idx, safe_name(families_in_use[idx])])
-            except:
+            except Exception:
                 continue
 
         if directory and is_string(directory):
             try:
                 write_csv(os.path.join(directory, (document.Title or "doc") + "_list"), _csv)
-            except:
+            except Exception:
                 pass
 
         print("Families found: %d\n(%d in use, %d not in use)" %
@@ -1021,55 +1199,8 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
                     print("\n*** Cancelled by user at family %d of %d ***" % (idx, total_families))
                 return document, purged_count, by_func
 
-            fam_by_func = {}
             f = families_in_use[idx]
-
-            try:
-                if f is None or not f.IsValidObject or f.IsInPlace or not f.IsEditable:
-                    continue
-            except:
-                continue
-
             fam_name = safe_name(f)
-
-            # Workshared: check ownership before attempting to edit
-            if host_is_workshared:
-                status = get_checkout_status(document, f.Id)
-                if status == 'other':
-                    owner = get_element_owner(document, f.Id)
-                    print(tbs + "SKIP (owned by %s): %s" % (owner or "other user", fam_name))
-                    SKIPPED_NOT_OWNED.append((fam_name, owner))
-                    continue
-                elif status == 'free':
-                    if not try_checkout(document, f.Id):
-                        print(tbs + "SKIP (checkout failed): %s" % fam_name)
-                        SKIPPED_NOT_OWNED.append((fam_name, "checkout failed"))
-                        continue
-
-            # Rename if clashes with host doc name
-            try:
-                doc_base = os.path.splitext(document.Title or "")[0]
-                if fam_name == doc_base:
-                    t = Transaction(document, "Rename Family")
-                    started = False
-                    try:
-                        t.Start()
-                        started = True
-                        f.Name = fam_name + "_"
-                        t.Commit()
-                        started = False
-                        print(tbs + fam_name + " renamed")
-                        fam_name = safe_name(f)
-                    except Exception as e:
-                        if started:
-                            try:
-                                t.RollBack()
-                            except:
-                                pass
-                        logger.debug("Rename error: %s" % str(e))
-                        continue
-            except:
-                pass
 
             if parent is None:
                 try:
@@ -1082,153 +1213,22 @@ def process_purge(document, parent=None, level=0, max_level=1, directory=None, s
                         left_txt = ""
                     output.set_title("%s - %d of %d finished%s" %
                                      (window_title, idx, total_families, left_txt))
-                except:
+                except Exception:
                     pass
 
                 update_cancel_status("Family %d of %d:\n%s" % (idx + 1, total_families, fam_name))
 
-            if cancelled():
-                if parent is None:
-                    print("\n*** Cancelled by user before opening '%s' ***" % fam_name)
-                return document, purged_count, by_func
-
-            fam_doc = None
-            try:
-                fam_doc = document.EditFamily(f)
-            except Exception as e:
-                logger.debug("EditFamily failed '%s': %s" % (fam_name, str(e)))
-                continue
-
-            if not doc_is_valid(fam_doc):
-                continue
-            try:
-                if not fam_doc.IsFamilyDocument:
-                    fam_doc.Close(False)
-                    continue
-            except:
-                continue
-
-            if cancelled():
-                try:
-                    fam_doc.Close(False)
-                except:
-                    pass
-                if parent is None:
-                    print("\n*** Cancelled by user - closed '%s' without changes ***" % fam_name)
-                return document, purged_count, by_func
-
-            sub_dir = None
-            fam_save_path = None
-            fam_file = None
-
-            if directory and is_string(directory):
-                try:
-                    fam_save_path, fam_file = save_family(fam_doc, directory)
-                    if fam_save_path is None:
-                        try:
-                            fam_doc.Close(False)
-                        except:
-                            pass
-                        continue
-                    base = fam_file[:-4] if fam_file.lower().endswith(".rfa") else fam_file
-                    sub_dir = os.path.join(str(directory), sanitise_filename(base[:32]))
-                except Exception as e:
-                    print(tbs + "Save error: %s - %s" % (fam_doc.Title, str(e)))
-                    try:
-                        fam_doc.Close(False)
-                    except:
-                        pass
-                    continue
-
-            child_purged = 0
-            child_by_func = {}
-            try:
-                fam_doc, child_purged, child_by_func = process_purge(
-                    fam_doc, parent=document,
-                    level=level + 1, max_level=max_level,
-                    directory=sub_dir, skipped_title=skipped_title
-                )
-            except Exception as e:
-                print(tbs + "Recursive purge error '%s': %s" % (fam_name, str(e)))
-                try:
-                    fam_doc.Close(False)
-                except:
-                    pass
-                continue
-
-            for pk in child_by_func:
-                fam_by_func.setdefault(pk, 0)
-                fam_by_func[pk] += child_by_func[pk]
-
-            if sub_dir and is_string(sub_dir) and os.path.exists(sub_dir):
-                try:
-                    if not os.listdir(sub_dir):
-                        os.rmdir(sub_dir)
-                except:
-                    pass
-
+            child_purged, fam_by_func = _purge_one_family(
+                document, f, level, max_level, directory, skipped_title, tbs, host_is_workshared
+            )
             purged_count += child_purged
-
-            size_before, size_after, size_diff = 0.0, 0.0, 0.0
-            if directory and fam_save_path and os.path.exists(fam_save_path):
-                size_before = file_size_mb(fam_save_path)
-                if child_purged > 0:
-                    _p2, _f2 = save_family(fam_doc, directory, after=True)
-                    if _p2 and os.path.exists(_p2):
-                        size_after = file_size_mb(_p2)
-                        size_diff = size_after - size_before
-                        if size_diff != 0:
-                            try:
-                                pct = -(1 - size_after / size_before) * 100 if size_before > 0 else 0
-                                print(tbs + "\t%.3f Mb (%.3f -> %.3f, %d%%)" %
-                                      (size_diff, size_before, size_after, pct))
-                                if parent is None:
-                                    PURGE_SIZES_SUM += size_diff
-                            except:
-                                pass
-                else:
-                    safe_remove(fam_save_path)
-
-            try:
-                fam_type = str(fam_doc.OwnerFamily.FamilyCategory.Name)
-            except:
-                fam_type = "Not family"
-
-            try:
-                csv_row = [
-                    str(level), fam_type,
-                    fam_doc.Title or "<untitled>",
-                    locale.str(size_before),
-                    locale.str(size_after),
-                    locale.str(size_diff)
-                ]
-                for pk in fam_by_func:
-                    csv_row.append(str(fam_by_func[pk]))
-                PURGE_RESULTS_CSV.append(csv_row)
-            except:
-                pass
-
-            # Reload only if smaller, not cancelled, and we can write to it
-            # In workshared, LoadFamily back requires checkout which try_checkout handled earlier
-            if size_diff < 0 and not cancelled():
-                load_family_back(fam_doc, document)
-
-            try:
-                fam_doc.Close(False)
-            except:
-                pass
-
-            if cancelled():
-                if parent is None:
-                    print("\n*** Cancelled by user after processing '%s' ***" % fam_name)
-                return document, purged_count, by_func
 
     return document, purged_count, by_func
 
 
 # -------------------- Workshared prompts --------------------
 def prompt_workshared_options():
-    """Ask user how to handle workshared model. Returns (proceed, sync_at_end)"""
+    """Returns (proceed, sync_at_end)."""
     try:
         from pyrevit import forms
         res = forms.alert(
@@ -1236,6 +1236,7 @@ def prompt_workshared_options():
             "The script will:\n"
             "  - Check out each family before editing it\n"
             "  - Skip families owned by other users\n"
+            "  - Reload each purged family back into the project\n"
             "  - Operate only on your local copy\n\n"
             "Recommended: run on a detached copy to avoid affecting the central model.\n\n"
             "How do you want to proceed?",
@@ -1257,22 +1258,73 @@ def prompt_workshared_options():
 
 
 # -------------------- Main --------------------
+def validate_active_doc():
+    if not doc_is_valid(ACTIVE_DOC):
+        print("ERROR: No valid active document.")
+        return False
+    try:
+        if ACTIVE_DOC.IsReadOnly:
+            print("ERROR: Active document is read-only.")
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def prepare_output_dir():
+    """Validate / create the staging directory used to SaveAs family snapshots."""
+    purge_dir = config_temp_dir()
+    dbg("Temp dir: %s" % purge_dir)
+
+    purge_dir_lower = purge_dir.lower()
+    risky_markers = ["\\shellfolders\\", "\\onedrive", "\\sharepoint"]
+    for marker in risky_markers:
+        if marker in purge_dir_lower:
+            print("ERROR: Temp directory is on a OneDrive / redirected folder: %s" % purge_dir)
+            print("       These paths can cause Revit to crash during family SaveAs operations.")
+            print("       Please use the Config button to pick a local drive path, e.g.:")
+            print("         C:\\Temp\\PurgeFamilies")
+            return None
+
+    if not safe_mkdir(purge_dir):
+        print("ERROR: Cannot create/access temp directory: %s" % purge_dir)
+        return None
+
+    try:
+        test_file = os.path.join(purge_dir, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+    except Exception as e:
+        print("ERROR: Temp directory is not writable: %s" % str(e))
+        return None
+
+    directory = create_directory(ACTIVE_DOC.Title or "document", purge_dir)
+    if not os.path.isdir(directory):
+        print("ERROR: Output directory was not created: %s" % directory)
+        return None
+    return directory
+
+
 def main():
     global PURGE_RESULTS_CSV, START_TIME, CANCEL_REQUESTED
     global IS_WORKSHARED, SYNC_AT_END, CHECKED_OUT_IDS, SKIPPED_NOT_OWNED
+    global PURGE_RESULTS, PURGE_SIZES_SUM, RELOADED_COUNT, RELOAD_FAILED
 
+    # Reset per-run state
     CANCEL_REQUESTED = False
     CHECKED_OUT_IDS = []
     SKIPPED_NOT_OWNED = []
+    PURGE_RESULTS = {}
+    PURGE_SIZES_SUM = 0.0
+    RELOADED_COUNT = 0
+    RELOAD_FAILED = []
 
     dbg("Startup")
-
-    if not doc_is_valid(ACTIVE_DOC):
-        print("ERROR: No valid active document.")
+    if not validate_active_doc():
         return
     dbg("Document: %s" % (ACTIVE_DOC.Title or "<untitled>"))
 
-    # Detect workshared and prompt
     IS_WORKSHARED = doc_is_workshared(ACTIVE_DOC)
     SYNC_AT_END = False
 
@@ -1285,44 +1337,13 @@ def main():
         if not HAS_CHECKOUT_STATUS:
             print("WARNING: CheckoutStatus API unavailable - checkout verification disabled.")
         dbg("Workshared mode: proceeding (sync_at_end=%s)" % SYNC_AT_END)
-    else:
-        dbg("Document is not workshared")
 
-    # Temp dir
-    purge_dir = config_temp_dir()
-    dbg("Temp dir: %s" % purge_dir)
-
-    purge_dir_lower = purge_dir.lower()
-    risky_markers = ["\\shellfolders\\", "\\onedrive", "\\sharepoint"]
-    for marker in risky_markers:
-        if marker in purge_dir_lower:
-            print("ERROR: Temp directory is on a OneDrive / redirected folder: %s" % purge_dir)
-            print("       These paths can cause Revit to crash during family SaveAs operations.")
-            print("       Please use the Config button to pick a local drive path, e.g.:")
-            print("         C:\\Temp\\PurgeFamilies")
-            return
-
-    if not safe_mkdir(purge_dir):
-        print("ERROR: Cannot create/access temp directory: %s" % purge_dir)
+    directory = prepare_output_dir()
+    if directory is None:
         return
-
-    try:
-        test_file = os.path.join(purge_dir, ".write_test")
-        with open(test_file, "w") as f:
-            f.write("ok")
-        os.remove(test_file)
-        dbg("Write test passed")
-    except Exception as e:
-        print("ERROR: Temp directory is not writable: %s" % str(e))
-        return
-
-    directory = create_directory(ACTIVE_DOC.Title or "document", purge_dir)
     dbg("Output dir: %s" % directory)
 
-    if not os.path.isdir(directory):
-        print("ERROR: Output directory was not created: %s" % directory)
-        return
-
+    # Determine starting level: if this is an RFA itself, skip the host pass
     level = 0
     max_level = 99
     if (ACTIVE_DOC.Title or "")[-4:].lower() == ".rfa":
@@ -1331,16 +1352,14 @@ def main():
         if __forceddebugmode__:
             max_level = 1
             dbg("Debug mode - max_level=1")
-    except:
+    except Exception:
         pass
 
     START_TIME = time.time()
-
     PURGE_RESULTS_CSV = [["Level", "Category", "Family name", "Size before",
-                         "Size after", "Size diff", "Purged: Families"]]
+                          "Size after", "Size diff", "Purged: Families"]]
 
-    shown = show_cancel_window()
-    if shown:
+    if show_cancel_window():
         dbg("Cancel window shown")
 
     dbg("Starting family collection...")
@@ -1351,20 +1370,17 @@ def main():
         print("ERROR: Purge process failed - %s" % str(e))
         try:
             print(traceback.format_exc())
-        except:
+        except Exception:
             pass
     finally:
         close_cancel_window()
 
-    # Workshared: handle sync / relinquish
+    # Workshared cleanup
     if IS_WORKSHARED:
         try:
             if SYNC_AT_END and not CANCEL_REQUESTED:
                 sync_with_central(ACTIVE_DOC)
             else:
-                # Release any checkouts we took without syncing
-                # Note: this will DISCARD changes if we haven't synced.
-                # So only relinquish if cancelled (to not leave checkouts locked)
                 if CANCEL_REQUESTED:
                     print("\nReleasing checked-out elements (changes in local only, not pushed to central)...")
                     relinquish_all_checked_out(ACTIVE_DOC)
@@ -1376,12 +1392,12 @@ def main():
 
     try:
         output.set_title("%s - Write CSV" % window_title)
-    except:
+    except Exception:
         pass
     write_csv(directory)
     try:
         output.set_title("%s - Done" % window_title)
-    except:
+    except Exception:
         pass
 
     if CANCEL_REQUESTED:
@@ -1395,6 +1411,12 @@ def main():
     total = sum(PURGE_RESULTS.values()) if PURGE_RESULTS else 0
     print('\nTOTAL purged: %d' % total)
     print('SIZE DIFFERENCE: %.3f Mb' % PURGE_SIZES_SUM)
+    print('Families reloaded back into project: %d' % RELOADED_COUNT)
+
+    if RELOAD_FAILED:
+        print('\n--- Families that FAILED to reload ---')
+        for nm in RELOAD_FAILED:
+            print("  %s" % nm)
 
     if IS_WORKSHARED and SKIPPED_NOT_OWNED:
         print('\n--- Skipped (workshared ownership) ---')
@@ -1411,7 +1433,7 @@ def main():
 
     try:
         output.update_progress(100, 100)
-    except:
+    except Exception:
         pass
 
 
@@ -1422,9 +1444,9 @@ if __name__ == '__main__':
         try:
             print("FATAL: %s" % str(e))
             print(traceback.format_exc())
-        except:
+        except Exception:
             pass
         try:
             close_cancel_window()
-        except:
+        except Exception:
             pass
