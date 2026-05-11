@@ -870,9 +870,11 @@ def purge_families_in_doc(document, families_not_used):
 def load_family_back(after_save_path, target_doc, fam_doc=None, fam_name=None):
     """Reload the purged family back into target_doc.
 
-    Preferred path: load from the saved _AFTER file on disk - this avoids any
-    issues with the in-memory family doc having unsaved modifications.
-    Fallback: call LoadFamily on the open family doc directly.
+    Primary: target_doc.LoadFamily(saved_path) — loads from the clean _AFTER file.
+      LoadFamily returns False when the family is already current (no changes) —
+      that is still a successful reload so we treat any non-exception as success.
+    Fallback: fam_doc.LoadFamily(target_doc) — the family doc is the caller here,
+      NOT the project doc (Revit API requires the caller to be a family document).
     """
     global RELOADED_COUNT, RELOAD_FAILED
 
@@ -883,50 +885,40 @@ def load_family_back(after_save_path, target_doc, fam_doc=None, fam_name=None):
 
     opts = FamilyLoadOption()
 
-    # Primary: load from saved file path (clean, post-purge state)
+    # Primary: load from saved _AFTER file path into the project/host doc
     if after_save_path and is_string(after_save_path) and os.path.exists(after_save_path):
         try:
-            from Autodesk.Revit.DB import Family
-            # IronPython returns (bool, Family) for methods with out-params
-            ret = target_doc.LoadFamily(after_save_path, opts)
-            # ret may be a bool, or a tuple (bool, Family)
-            success = ret[0] if isinstance(ret, tuple) else bool(ret)
-            if success:
-                RELOADED_COUNT += 1
-                return True
+            target_doc.LoadFamily(after_save_path, opts)
+            RELOADED_COUNT += 1
+            return True
         except Exception as e:
             print("  reload from path failed (%s): %s" % (fam_name or "?", str(e)))
 
-        # Retry without options (older Revit API)
+        # Retry without options (older API surface)
         try:
-            from Autodesk.Revit.DB import Family
-            ret = target_doc.LoadFamily(after_save_path)
-            success = ret[0] if isinstance(ret, tuple) else bool(ret)
-            if success:
-                RELOADED_COUNT += 1
-                return True
+            target_doc.LoadFamily(after_save_path)
+            RELOADED_COUNT += 1
+            return True
         except Exception as e:
             print("  reload from path (no opts) failed (%s): %s" % (fam_name or "?", str(e)))
+    else:
+        print("  reload: _AFTER file unavailable for '%s' - trying in-memory doc" % (fam_name or "?"))
 
-    # Fallback: load from the open (in-memory) family document
+    # Fallback: fam_doc.LoadFamily(target_doc) — MUST be called on the family doc
     if doc_is_valid(fam_doc):
         try:
-            ret = target_doc.LoadFamily(fam_doc, opts)
-            success = ret[0] if isinstance(ret, tuple) else bool(ret)
-            if success:
-                RELOADED_COUNT += 1
-                return True
+            fam_doc.LoadFamily(target_doc, opts)
+            RELOADED_COUNT += 1
+            return True
         except Exception as e:
-            print("  reload from doc failed (%s): %s" % (fam_name or "?", str(e)))
+            print("  reload from fam_doc failed (%s): %s" % (fam_name or "?", str(e)))
 
         try:
-            ret = target_doc.LoadFamily(fam_doc)
-            success = ret[0] if isinstance(ret, tuple) else bool(ret)
-            if success:
-                RELOADED_COUNT += 1
-                return True
+            fam_doc.LoadFamily(target_doc)
+            RELOADED_COUNT += 1
+            return True
         except Exception as e:
-            print("  reload fallback failed (%s): %s" % (fam_name or "?", str(e)))
+            print("  reload fam_doc fallback failed (%s): %s" % (fam_name or "?", str(e)))
 
     if fam_name:
         RELOAD_FAILED.append(fam_name)
