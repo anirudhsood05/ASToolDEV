@@ -339,8 +339,11 @@ def get_element_owner(document, element_id):
 
 
 def try_checkout(document, element_id):
-    """Attempt to check out a single element. Returns True if we own it after the call."""
+    """Attempt to check out a single element. Returns True if we own it after the call.
+    Per-doc check: if THIS document isn't workshared, nothing to checkout."""
     global CHECKED_OUT_IDS
+    if not doc_is_workshared(document):
+        return True
     if not IS_WORKSHARED:
         return True
 
@@ -843,9 +846,12 @@ def save_family(fam_doc, directory, after=False):
 
 
 def purge_families_in_doc(document, families_not_used):
-    """Delete unused families. In workshared docs, only deletes ones we own."""
+    """Delete unused families. In workshared docs, only deletes ones we own.
+    Workshared checkout applies only when THIS document is workshared - nested
+    family docs are never workshared even if the host project is."""
     not_purged = []
     count = 0
+    doc_workshared = doc_is_workshared(document)
     for f in families_not_used:
         fam_name = "<unknown>"
         try:
@@ -857,9 +863,9 @@ def purge_families_in_doc(document, families_not_used):
             except Exception:
                 pass
 
-            fam_name = safe_name(f)
+            fam_name = safe_name(f) or "<unnamed>"
 
-            if IS_WORKSHARED and not try_checkout(document, f.Id):
+            if doc_workshared and not try_checkout(document, f.Id):
                 print("    Delete skipped (no checkout): %s" % fam_name)
                 not_purged.append(f)
                 continue
