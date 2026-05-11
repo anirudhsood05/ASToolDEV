@@ -867,30 +867,66 @@ def purge_families_in_doc(document, families_not_used):
     return count, len(families_not_used), not_purged
 
 
-def load_family_back(fam_doc, target_doc, fam_name=None):
-    """Reload the purged family back into target_doc so the project keeps it.
-    Returns True on success. Tries the IFamilyLoadOptions overload first."""
+def load_family_back(after_save_path, target_doc, fam_doc=None, fam_name=None):
+    """Reload the purged family back into target_doc.
+
+    Preferred path: load from the saved _AFTER file on disk - this avoids any
+    issues with the in-memory family doc having unsaved modifications.
+    Fallback: call LoadFamily on the open family doc directly.
+    """
     global RELOADED_COUNT, RELOAD_FAILED
-    if not doc_is_valid(fam_doc) or not doc_is_valid(target_doc):
+
+    if not doc_is_valid(target_doc):
         if fam_name:
             RELOAD_FAILED.append(fam_name)
         return False
 
-    # Preferred: pass overwrite options so an existing family is replaced
-    try:
-        fam_doc.LoadFamily(target_doc, FamilyLoadOption())
-        RELOADED_COUNT += 1
-        return True
-    except Exception as e:
-        logger.debug("LoadFamily(doc, opts) failed: %s" % str(e))
+    opts = FamilyLoadOption()
 
-    # Fallback for older API surfaces
-    try:
-        fam_doc.LoadFamily(target_doc)
-        RELOADED_COUNT += 1
-        return True
-    except Exception as e:
-        logger.debug("LoadFamily(doc) failed: %s" % str(e))
+    # Primary: load from saved file path (clean, post-purge state)
+    if after_save_path and is_string(after_save_path) and os.path.exists(after_save_path):
+        try:
+            from Autodesk.Revit.DB import Family
+            # IronPython returns (bool, Family) for methods with out-params
+            ret = target_doc.LoadFamily(after_save_path, opts)
+            # ret may be a bool, or a tuple (bool, Family)
+            success = ret[0] if isinstance(ret, tuple) else bool(ret)
+            if success:
+                RELOADED_COUNT += 1
+                return True
+        except Exception as e:
+            print("  reload from path failed (%s): %s" % (fam_name or "?", str(e)))
+
+        # Retry without options (older Revit API)
+        try:
+            from Autodesk.Revit.DB import Family
+            ret = target_doc.LoadFamily(after_save_path)
+            success = ret[0] if isinstance(ret, tuple) else bool(ret)
+            if success:
+                RELOADED_COUNT += 1
+                return True
+        except Exception as e:
+            print("  reload from path (no opts) failed (%s): %s" % (fam_name or "?", str(e)))
+
+    # Fallback: load from the open (in-memory) family document
+    if doc_is_valid(fam_doc):
+        try:
+            ret = target_doc.LoadFamily(fam_doc, opts)
+            success = ret[0] if isinstance(ret, tuple) else bool(ret)
+            if success:
+                RELOADED_COUNT += 1
+                return True
+        except Exception as e:
+            print("  reload from doc failed (%s): %s" % (fam_name or "?", str(e)))
+
+        try:
+            ret = target_doc.LoadFamily(fam_doc)
+            success = ret[0] if isinstance(ret, tuple) else bool(ret)
+            if success:
+                RELOADED_COUNT += 1
+                return True
+        except Exception as e:
+            print("  reload fallback failed (%s): %s" % (fam_name or "?", str(e)))
 
     if fam_name:
         RELOAD_FAILED.append(fam_name)
@@ -1042,10 +1078,12 @@ def _purge_one_family(document, f, level, max_level, directory, skipped_title, t
             pass
 
     size_before, size_after, size_diff = 0.0, 0.0, 0.0
+    after_save_path = None
     if directory and fam_save_path and os.path.exists(fam_save_path):
         size_before = file_size_mb(fam_save_path)
         if child_purged > 0:
             _p2, _f2 = save_family(fam_doc, directory, after=True)
+            after_save_path = _p2  # capture for reload below
             if _p2 and os.path.exists(_p2):
                 size_after = file_size_mb(_p2)
                 size_diff = size_after - size_before
@@ -1079,10 +1117,11 @@ def _purge_one_family(document, f, level, max_level, directory, skipped_title, t
     except Exception:
         pass
 
-    # Reload only if smaller (something was actually purged) and not cancelled.
-    # This ensures the project keeps the same families but with reduced size.
-    if size_diff < 0 and not cancelled():
-        if not load_family_back(fam_doc, document, fam_name):
+    # Reload if the family got smaller (nested families were purged) and not cancelled.
+    # Always attempt reload when child_purged > 0, even if size comparison unavailable.
+    should_reload = (child_purged > 0) and not cancelled()
+    if should_reload:
+        if not load_family_back(after_save_path, document, fam_doc=fam_doc, fam_name=fam_name):
             print(tbs + "WARNING: failed to reload '%s' back to host" % fam_name)
 
     try:
