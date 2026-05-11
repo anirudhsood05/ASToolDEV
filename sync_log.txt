@@ -286,3 +286,44 @@ Exc Files : Thumbs.db
    Speed :              49.071 MegaBytes/min.
    Ended : 11 May 2026 13:27:49
 
+
+-------------------------------------------------------------------------------
+   ROBOCOPY     ::     Robust File Copy for Windows                              
+-------------------------------------------------------------------------------
+
+  Started : 11 May 2026 13:46:07
+   Source : H:\ShellFolders\Documents\GitHub\ASToolDEV\AS_ToolsDev.extension\
+     Dest : I:\002_BIM\007_Addins\Aukett Swanke\Extensions\ASToolDEV\AS_ToolsDev.extension\
+
+    Files : *.*
+	    
+Exc Files : Thumbs.db
+	    .DS_Store
+	    *.pyc
+	    *.pyo
+	    *.log
+	    
+ Exc Dirs : __pycache__
+	    .git
+	    .vscode
+	    .idea
+	    
+  Options : *.* /NDL /S /E /DCOPY:DA /COPY:DAT /PURGE /MIR /NP /R:1000000 /W:30 
+
+------------------------------------------------------------------------------
+
+	    Newer     		   49360	H:\ShellFolders\Documents\GitHub\ASToolDEV\AS_ToolsDev.extension\AS_ToolsDEV.tab\Admin.Panel\QA_QC.pulldown\PurgeFamilies.pushbutton\script.py
+
+------------------------------------------------------------------------------
+
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :       151         0       151         0         0         2
+   Files :       552         1       551         0         0         0
+   Bytes :    9.68 m    48.2 k    9.63 m         0         0         0
+   Times :   0:00:00   0:00:00                       0:00:00   0:00:00
+
+
+   Speed :           1,121,818 Bytes/sec.
+   Speed :              64.191 MegaBytes/min.
+   Ended : 11 May 2026 13:46:08
+
