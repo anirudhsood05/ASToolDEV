@@ -847,6 +847,7 @@ def purge_families_in_doc(document, families_not_used):
     not_purged = []
     count = 0
     for f in families_not_used:
+        fam_name = "<unknown>"
         try:
             if f is None or not f.IsValidObject:
                 continue
@@ -856,13 +857,18 @@ def purge_families_in_doc(document, families_not_used):
             except Exception:
                 pass
 
+            fam_name = safe_name(f)
+
             if IS_WORKSHARED and not try_checkout(document, f.Id):
+                print("    Delete skipped (no checkout): %s" % fam_name)
                 not_purged.append(f)
                 continue
 
             document.Delete(f.Id)
             count += 1
-        except Exception:
+        except Exception as e:
+            # Surface why Revit rejected the delete - usually a hidden reference
+            print("    Delete failed for '%s': %s" % (fam_name, str(e)))
             not_purged.append(f)
     return count, len(families_not_used), not_purged
 
